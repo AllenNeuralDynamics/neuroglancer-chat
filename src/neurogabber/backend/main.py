@@ -359,7 +359,7 @@ def chat(req: ChatRequest):
         ]
         conversation = base_messages + [m.model_dump() for m in req.messages]
     
-    max_iters = 3
+    max_iters = 6
     overall_mutated = False
     tool_execution_records = []  # truncated records for response
     full_trace_steps = []  # full detail trace retained server-side
@@ -641,14 +641,10 @@ def _execute_tool_by_name(name: str, args: dict):
             return t_data_preview(**args)
         if name == "data_describe":
             return t_data_describe(**args)
-        if name == "data_select":
-            return t_data_select(**args)
         if name == "data_list_summaries":
             return t_data_list_summaries()
         if name == "data_info":
             return t_data_info(**args)
-        if name == "data_sample":
-            return t_data_sample(**args)
         if name == "data_ng_views_table":
             return t_data_ng_views_table(**args)
         if name == "ng_add_layer":
@@ -853,54 +849,6 @@ def t_data_describe(file_id: str = Body(..., embed=True)):
     except Exception as e:
         return {"error": str(e)}
 
-@app.post("/tools/data_select")
-def t_data_select(
-    file_id: str = Body(..., embed=True),
-    columns: list[str] | None = Body(None, embed=True),
-    filters: list[dict] | None = Body(None, embed=True),
-    limit: int = Body(20, embed=True),
-):
-    try:
-        df = DATA_MEMORY.get_df(file_id)
-        if columns:
-            missing = [c for c in columns if c not in df.columns]
-            if missing:
-                return {"error": f"Unknown columns: {missing}"}
-            df = df.select(columns)
-        if filters:
-            exprs = []
-            for f in filters:
-                col = f.get("column")
-                op = f.get("op")
-                val = f.get("value")
-                if col not in df.columns:
-                    return {"error": f"Filter column not in dataframe: {col}"}
-                col_expr = pl.col(col)
-                if op == "==":
-                    exprs.append(col_expr == val)
-                elif op == "!=":
-                    exprs.append(col_expr != val)
-                elif op == ">":
-                    exprs.append(col_expr > val)
-                elif op == "<":
-                    exprs.append(col_expr < val)
-                elif op == ">=":
-                    exprs.append(col_expr >= val)
-                elif op == "<=":
-                    exprs.append(col_expr <= val)
-                else:
-                    return {"error": f"Unsupported op {op}"}
-            if exprs:
-                import functools, operator
-                combined = functools.reduce(operator.and_, exprs)
-                df = df.filter(combined)
-        limit = max(1, min(limit, 500))
-        subset = df.head(limit)
-        meta = DATA_MEMORY.add_summary(file_id, "select", subset, note="filtered/select preview")
-        return {"summary": meta, "preview_rows": subset.to_dicts()}
-    except Exception as e:
-        return {"error": str(e)}
-
 @app.post("/tools/data_list_summaries")
 def t_data_list_summaries():
     return {"summaries": DATA_MEMORY.list_summaries()}
@@ -1023,26 +971,43 @@ def execute_query_polars(
         else:
             truncated = False
         
+        # Round numeric columns to 2 decimal places for readability
+        for col in result.columns:
+            if result[col].dtype in [pl.Float32, pl.Float64]:
+                result = result.with_columns(pl.col(col).round(2))
+        
         # Save as summary if requested
+        summary_id = None
         if save_as:
             DATA_MEMORY.add_summary(source_id, "query", result, note=f"Query: {expression[:100]}")
+            summary_id = save_as
         
-        # Return result
-        return {
+        # Return result with hint about reusing data
+        return_data = {
             "ok": True,
             "data": result.to_dict(as_series=False),
             "rows": len(result),
             "columns": result.columns,
             "truncated": truncated,
-            "saved_as": save_as
+            "saved_as": summary_id,
+            "expression": expression  # Include the expression for code formatting
         }
+        
+        # Add hint for follow-up queries if data returned
+        if len(result) > 0:
+            return_data["hint"] = f"This result has {len(result)} rows. For follow-up filtering/analysis on this data, query the original file_id='{source_id}' with additional filters."
+        
+        return return_data
     
     except NameError as e:
+        _dbg(f"NameError in expression: {e}")
         return {"error": f"Invalid expression: {e}. Only 'df' and 'pl' are available."}
     except SyntaxError as e:
+        _dbg(f"SyntaxError in expression: {e}")
         return {"error": f"Syntax error in expression: {e}"}
     except Exception as e:
-        return {"error": f"Expression execution failed: {e}"}
+        _dbg(f"Exception executing expression: {type(e).__name__}: {e}")
+        return {"error": f"Expression execution failed: {type(e).__name__}: {e}"}
 
 
 @app.post("/tools/data_query_polars")
@@ -1064,43 +1029,6 @@ def t_data_query_polars(
         save_as=save_as,
         limit=limit
     )
-
-
-@app.post("/tools/data_sample")
-def t_data_sample(
-    file_id: str = Body(..., embed=True),
-    n: int = Body(5, embed=True),
-    seed: int | None = Body(None, embed=True),
-    replace: bool = Body(False, embed=True),
-):
-    """Return a random sample of rows from a dataframe (without replacement by default).
-
-    Parameters:
-      file_id: ID of uploaded file
-      n: number of rows to sample (default 5, bounded 1..1000)
-      seed: optional integer seed for reproducibility (None => random)
-      replace: sample with replacement (default False)
-    """
-    try:
-        df = DATA_MEMORY.get_df(file_id)
-        n = max(1, min(n, 1000))
-        if not replace and n > df.height:
-            n = df.height
-        # polars sample: shuffle=True ensures random order even when n==height
-        sampled = df.sample(n=n, with_replacement=replace, shuffle=True, seed=seed)
-        return {
-            "file_id": file_id,
-            "requested": n,
-            "returned": sampled.height,
-            "with_replacement": replace,
-            "seed": seed,
-            "rows": sampled.to_dicts(),
-            "columns": sampled.columns,
-        }
-    except KeyError:
-        return {"error": f"Unknown file_id {file_id}"}
-    except Exception as e:
-        return {"error": str(e)}
 
 
 @app.post("/tools/data_ng_views_table")

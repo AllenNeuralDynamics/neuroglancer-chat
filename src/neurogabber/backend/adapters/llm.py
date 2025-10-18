@@ -13,23 +13,46 @@ if _API_KEY:
 SYSTEM_PROMPT = """
 You are Neurogabber, a helpful assistant for Neuroglancer.
 
+CRITICAL: TAKE ACTION FIRST, EXPLAIN LATER. Use tools immediately when the user asks about data.
+
 Decision rules:
+- DEFAULT TO ACTION: When in doubt, call a tool. Don't ask permission or explain first.
+- Data questions = IMMEDIATE tool call. Examples: "what are the unique values?", "how many rows?", "show me X" → call the tool NOW in your first response.
 - If the user only wants information answer directly from the provided 'Current viewer state summary' (no tools).
-- Have a bias to action. When data manipulation is mentioned, use the tool right away without checking with the user.
 - If the user wants to modify the view/viewer (camera, LUTs, annotations, layers) call the corresponding tool(s).
 - If unsure of layer names or ranges, call ng_state_summary first (detail='standard' unless user requests otherwise).
 - After performing modifications, if the user requests a link or updated view, call ng_state_link (NOT state_save) to return a masked markdown hyperlink. Only call state_save when explicit persistence is requested (e.g. 'save', 'persist', 'store').
 - Do not paste raw Neuroglancer URLs directly; always rely on ng_state_link for sharing the current view.
 
-Dataframe rules:
+Dataframe rules - ACTION REQUIRED:
+- ANY question about CSV/dataframe content = IMMEDIATE tool call. Do NOT respond with text first.
 - When the user mentions "data", "dataframe", "file", or "csv" without specifying which file, ALWAYS use the most recent file (shown in Data context).
-- For simple operations, use specific tools (data_sample, data_preview, data_describe, data_select).
+- Questions like "what are the unique values in X?" or "how many Y?" or "show me Z" → call data_query_polars IMMEDIATELY.
+- For simple operations, use specific tools (data_preview, data_describe).
 - For complex queries (multiple filters, aggregations, computed columns, sorting), use data_query_polars with a Polars expression.
 - In data_query_polars: use 'df' for the dataframe and 'pl' for Polars functions. All standard Polars operations are supported.
+- ⚠️ CRITICAL: This is POLARS not pandas. NEVER use groupby() - it will ERROR. ALWAYS use group_by() with underscore.
+- ⚠️ WRONG: df.groupby('col') ❌ RIGHT: df.group_by('col') ✓
+- Common Polars patterns (NOTE THE UNDERSCORES):
+  * Grouping: df.group_by('col').agg(pl.col('value').max())  [NOT groupby!]
+  * Filtering: df.filter(pl.col('x') > 5)
+  * Selecting: df.select(['col1', 'col2'])
+  * Sorting: df.sort('col') or df.sort('col', descending=True)
+  * Unique values: df.select(pl.col('col').unique())
+  * Sampling: df.sample(n=10) or df.sample(n=10, seed=42) for reproducibility
 - If you want to reuse a query result, use save_as parameter to store it as a summary table, then reference it with summary_id in subsequent queries.
-- If the user wants a random sample, assume no seed, without replacement, and uniforming across all rows. Unless otherwise specificed.
+- CRITICAL: When you receive tool results from data_query_polars, the result includes an "expression" field. You MUST display this expression in a Python code block in your response to the user.
+- Format the query result like this:
+  1. Show the Polars expression in a code block: ```python\n{expression}\n```
+  2. Then present the data results (table, count, or summary)
+  3. Example: "Here are the results:\n\n```python\ndf.group_by('cluster_label').agg(pl.col('log_volume').max())\n```\n\n| cluster_label | log_volume |\n..."
 
-Keep answers concise. Provide brief rationale before tool calls when helpful. Avoid redundant summaries."""
+Conversation context awareness:
+- If you just returned data/results in the previous response, the user's next question likely refers to that data.
+- When the user asks a follow-up question about filtering, counting, or analyzing data you just showed, they mean the data from your previous response.
+- Before making a new query, check if you can answer from the data you just returned.
+
+Keep answers concise. Provide brief rationale AFTER tool results, not before. Avoid redundant summaries."""
 
 # Define available tools (schemas must match your Pydantic models)
 TOOLS = [
@@ -174,23 +197,6 @@ DATA_TOOLS = [
   {
     "type": "function",
     "function": {
-      "name": "data_sample",
-      "description": "Return a random sample of rows from a dataframe (without replacement by default). Use to inspect a subset before analysis.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "file_id": {"type": "string"},
-          "n": {"type": "integer", "default": 5, "minimum": 1, "maximum": 1000},
-          "seed": {"type": ["integer", "null"], "description": "Optional seed for reproducibility"},
-          "replace": {"type": "boolean", "default": False}
-        },
-        "required": ["file_id"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
       "name": "data_ng_views_table",
       "description": "Generate multiple Neuroglancer view links from a dataframe (e.g., top N by a metric) returning a table of id + metrics + links. Mutates state to first view.",
       "parameters": {
@@ -252,34 +258,6 @@ DATA_TOOLS = [
         "type": "object",
         "properties": {
           "file_id": {"type": "string"}
-        },
-        "required": ["file_id"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "data_select",
-      "description": "Select subset of columns and filtered rows; stores as summary table.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "file_id": {"type": "string"},
-          "columns": {"type": "array", "items": {"type": "string"}},
-          "filters": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "column": {"type": "string"},
-                "op": {"type": "string", "enum": ["==","!=",">","<",">=","<="]},
-                "value": {}
-              },
-              "required": ["column", "op", "value"]
-            }
-          },
-          "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 500}
         },
         "required": ["file_id"]
       }
