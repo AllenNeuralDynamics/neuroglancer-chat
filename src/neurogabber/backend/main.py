@@ -54,6 +54,69 @@ _TRACE_HISTORY: list[dict] = []  # store recent full traces (in-memory, capped)
 _TRACE_HISTORY_MAX = 50
 
 
+def _detect_spatial_columns(df) -> tuple[list[str], str] | None:
+    """Detect spatial coordinate columns in a dataframe.
+    
+    Returns:
+        Tuple of (column_names, pattern) or None if not found.
+        Patterns: 'xyz', 'centroid_xyz', etc.
+    """
+    import polars as pl
+    cols = df.columns
+    
+    # Try common patterns in order of preference
+    patterns = [
+        (['x', 'y', 'z'], 'xyz'),
+        (['centroid_x', 'centroid_y', 'centroid_z'], 'centroid_xyz'),
+        (['center_x', 'center_y', 'center_z'], 'center_xyz'),
+        (['pos_x', 'pos_y', 'pos_z'], 'pos_xyz'),
+        (['X', 'Y', 'Z'], 'XYZ'),
+    ]
+    
+    for col_names, pattern in patterns:
+        if all(c in cols for c in col_names):
+            return (col_names, pattern)
+    
+    return None
+
+
+def _generate_ng_links_for_rows(df, spatial_cols: list[str]) -> list[str]:
+    """Generate Neuroglancer URLs for each row based on spatial coordinates.
+    
+    Hybrid approach: Returns raw URLs. Frontend will render them as clickable links.
+    
+    Args:
+        df: Polars DataFrame with spatial columns
+        spatial_cols: List of [x_col, y_col, z_col] column names
+        
+    Returns:
+        List of raw NG URLs, one per row
+    """
+    global CURRENT_STATE
+    
+    links = []
+    for row in df.to_dicts():
+        try:
+            cx, cy, cz = row[spatial_cols[0]], row[spatial_cols[1]], row[spatial_cols[2]]
+            # Skip rows with null coordinates
+            if cx is None or cy is None or cz is None:
+                links.append("")
+                continue
+                
+            # Clone current state and set view to this row's coordinates
+            state_copy = CURRENT_STATE.clone()
+            state_copy.set_view({"x": cx, "y": cy, "z": cz}, None, None)
+            link_url = state_copy.to_url()
+            
+            # Return raw URL (frontend will create markdown link)
+            links.append(link_url)
+        except Exception as e:
+            _dbg(f"Failed to generate link for row: {e}")
+            links.append("")
+    
+    return links
+
+
 @app.post("/tools/ng_set_view")
 def t_set_view(args: SetView):
     global CURRENT_STATE
@@ -192,7 +255,17 @@ def _data_context_block(max_files: int = 10, max_summaries: int = 10) -> str:
         # Highlight the most recent file
         most_recent = files[-1] if files else None
         if most_recent:
-            parts.append(f"Most recent file (use this by default): file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}")
+            # Check for spatial columns in the most recent file
+            try:
+                df = DATA_MEMORY.get_df(most_recent['file_id'])
+                spatial_info = _detect_spatial_columns(df)
+                spatial_note = ""
+                if spatial_info:
+                    spatial_cols, pattern = spatial_info
+                    spatial_note = f" [HAS SPATIAL COLS: {', '.join(spatial_cols)} - include these in queries for auto NG links]"
+                parts.append(f"Most recent file (use this by default): file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}{spatial_note}")
+            except:
+                parts.append(f"Most recent file (use this by default): file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}")
         
         if len(files) > 1:
             parts.append("Other files:")
@@ -364,6 +437,7 @@ def chat(req: ChatRequest):
     tool_execution_records = []  # truncated records for response
     full_trace_steps = []  # full detail trace retained server-side
     aggregated_views_table = None
+    aggregated_ng_views = None  # Track ng_views from data_query_polars
 
     timing.start_agent_loop()
     
@@ -428,6 +502,13 @@ def chat(req: ChatRequest):
                 )
             
             _dbg(f"Tool '{fn}' result keys={list(result_payload.keys())}")
+            
+            # Capture ng_views from data_query_polars for frontend rendering
+            if fn == "data_query_polars" and isinstance(result_payload, dict):
+                if "ng_views" in result_payload:
+                    aggregated_ng_views = result_payload["ng_views"]
+                    _dbg(f"Captured ng_views: {len(aggregated_ng_views)} views for frontend rendering")
+            
             if fn == "data_ng_views_table" and isinstance(result_payload, dict):
                 if "error" in result_payload and "rows" not in result_payload:
                     # Surface error to client (Option A) & log details (Option C)
@@ -558,6 +639,7 @@ def chat(req: ChatRequest):
         "state_link": state_link_block,
         "tool_trace": tool_execution_records,
         "views_table": aggregated_views_table,
+        "ng_views": aggregated_ng_views,  # Expose ng_views for frontend rendering
     }
     
     timing.mark("response_sent")
@@ -666,9 +748,19 @@ def _mask_ng_urls(text: str) -> str:
     Each distinct URL is collapsed to the label 'Updated Neuroglancer view'. If
     multiple different URLs appear, they will receive a numeric suffix to
     differentiate: 'Updated Neuroglancer view (2)', etc.
+    
+    Skips masking if the text already contains markdown table with [view](...) links
+    to avoid double-wrapping.
     """
     logger.info(f"{text}")
     import re
+    
+    # Check if text contains markdown table with [view](...) links (from query results)
+    # Pattern: | ... | [view](https://...) |
+    if re.search(r'\|\s*\[view\]\(https?://[^\)]+\)\s*\|', text):
+        _dbg("Skipping URL masking - text contains markdown table with [view] links")
+        return text
+    
     url_pattern = re.compile(r"https?://[^\s)]+")
     candidates = url_pattern.findall(text)
     urls = [u for u in candidates if 'neuroglancer' in u]
@@ -855,7 +947,7 @@ def t_data_list_summaries():
 
 
 # ==============================================================================
-# Core Tool Logic Functions (FastAPI-independent)
+# Core Tool Logic Functions
 # ==============================================================================
 # These functions contain pure business logic and can be called from:
 # 1. HTTP endpoints (via wrapper functions below)
@@ -976,6 +1068,15 @@ def execute_query_polars(
             if result[col].dtype in [pl.Float32, pl.Float64]:
                 result = result.with_columns(pl.col(col).round(2))
         
+        # Detect spatial columns and generate Neuroglancer links
+        spatial_info = _detect_spatial_columns(result)
+        ng_links = None
+        if spatial_info and len(result) > 0 and len(result) <= 100:  # Only for reasonable row counts
+            spatial_cols, pattern = spatial_info
+            _dbg(f"Detected spatial columns: {spatial_cols} (pattern: {pattern})")
+            ng_links = _generate_ng_links_for_rows(result, spatial_cols)
+            _dbg(f"Generated {len([l for l in ng_links if l])} NG links")
+        
         # Save as summary if requested
         summary_id = None
         if save_as:
@@ -992,6 +1093,15 @@ def execute_query_polars(
             "saved_as": summary_id,
             "expression": expression  # Include the expression for code formatting
         }
+        
+        # Add structured NG views if generated (hybrid approach: backend provides URLs, frontend renders)
+        if ng_links:
+            # Convert to structured format with row indices
+            return_data["ng_views"] = [
+                {"row_index": i, "url": url} 
+                for i, url in enumerate(ng_links) if url
+            ]
+            return_data["spatial_columns"] = spatial_info[0]
         
         # Add hint for follow-up queries if data returned
         if len(result) > 0:

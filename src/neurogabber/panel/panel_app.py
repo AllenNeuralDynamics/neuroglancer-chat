@@ -189,18 +189,26 @@ async def agent_call(prompt: str) -> dict:
     """Call backend iterative chat once; backend executes tools.
 
     Returns:
-      answer: final assistant message
+      answer: final assistant message (enhanced with View column if ng_views present)
       mutated: bool indicating any mutating tool executed server-side
       url/masked: Neuroglancer link info if mutated (present only when mutated)
+      ng_views: structured list of {row_index, url} if spatial query was executed
     """
     async with httpx.AsyncClient(timeout=120) as client:
         chat_payload = {"messages": [{"role": "user", "content": prompt}]}
         resp = await client.post(f"{BACKEND}/agent/chat", json=chat_payload)
         data = resp.json()
         answer = None
+        ng_views = data.get("ng_views")  # Extract ng_views from backend response
+        
         if data.get("choices"):
             msg = data["choices"][0].get("message", {})
             answer = msg.get("content")
+        
+        # If ng_views found, enhance the answer with View column
+        if ng_views and answer:
+            answer = _enhance_table_with_ng_views(answer, ng_views)
+        
         mutated = bool(data.get("mutated"))
         state_link = data.get("state_link") or {}
         tool_trace = data.get("tool_trace") or []
@@ -211,16 +219,78 @@ async def agent_call(prompt: str) -> dict:
             "masked": state_link.get("masked_markdown"),
             "tool_trace": tool_trace,
             "views_table": data.get("views_table"),
+            "ng_views": ng_views,
         }
+
+def _enhance_table_with_ng_views(text: str, ng_views: list) -> str:
+    """Enhance markdown table by adding View column with clickable links.
+    
+    Args:
+        text: Markdown text that may contain a table
+        ng_views: List of {"row_index": i, "url": "https://..."} from backend
+    
+    Returns:
+        Enhanced text with View column added to table, or original text if no table found
+    """
+    if not ng_views or not text:
+        return text
+    
+    # Create row_index -> url mapping
+    url_map = {view["row_index"]: view["url"] for view in ng_views if "row_index" in view and "url" in view}
+    if not url_map:
+        return text
+    
+    lines = text.split("\n")
+    enhanced_lines = []
+    in_table = False
+    table_row_idx = 0  # Track data rows (starts at 0 for first data row)
+    
+    for line in lines:
+        # Detect table by markdown syntax: | col1 | col2 |
+        if "|" in line:
+            parts = [p.strip() for p in line.split("|")]
+            # Filter empty parts from leading/trailing |
+            parts = [p for p in parts if p]
+            
+            if not in_table:
+                # First table row - add "View" header
+                in_table = True
+                table_row_idx = 0
+                enhanced_lines.append(line.rstrip() + " View |")
+            elif all(p.replace("-", "").replace(":", "").strip() == "" for p in parts):
+                # Separator row (---)
+                enhanced_lines.append(line.rstrip() + " --- |")
+            else:
+                # Data row - add link if available
+                if table_row_idx in url_map:
+                    url = url_map[table_row_idx]
+                    enhanced_lines.append(line.rstrip() + f" [view]({url}) |")
+                else:
+                    enhanced_lines.append(line.rstrip() + " - |")
+                table_row_idx += 1  # Increment AFTER using the index
+        else:
+            # Not a table line - reset table tracking
+            if in_table:
+                table_row_idx = 0
+            in_table = False
+            enhanced_lines.append(line)
+    
+    return "\n".join(enhanced_lines)
+
 
 def _mask_client_side(text: str) -> str:
     """Safety net masking on frontend: collapse raw Neuroglancer URLs.
 
     Mirrors backend labeling but simpler (does not number multiple distinct URLs).
+    Skips URLs that are already inside markdown links to avoid double-wrapping.
     """
     if not text:
         return text
-    url_pattern = re.compile(r"https?://[^\s)]+")
+    
+    # Pattern that matches raw URLs NOT already inside markdown link syntax [text](url)
+    # Negative lookbehind (?<!\]\() ensures we don't match URLs after ](
+    url_pattern = re.compile(r"(?<!\]\()https?://[^\s)]+")
+    
     def repl(m):
         u = m.group(0)
         if 'neuroglancer' in u:
@@ -334,7 +404,12 @@ async def respond(contents: str, user: str, **kwargs):
             # Only yield at the end if we haven't yielded anything yet
             if not has_yielded:
                 if accumulated_message:
-                    yield _mask_client_side(accumulated_message)
+                    masked_msg = _mask_client_side(accumulated_message)
+                    # Wrap tables in Markdown pane for proper rendering
+                    if "|" in masked_msg and masked_msg.count("\n") > 2:
+                        yield pn.pane.Markdown(masked_msg)
+                    else:
+                        yield masked_msg
                 else:
                     yield "(no response)"
             
@@ -491,7 +566,12 @@ async def respond(contents: str, user: str, **kwargs):
                     else:
                         yield pn.Column(embedded_table_component, sizing_mode="stretch_width")
                 else:
-                    yield safe_answer if safe_answer else "(no response)"
+                    # Check if safe_answer contains a table (has pipe characters in multiple lines)
+                    # If so, wrap in Markdown pane to ensure proper rendering
+                    if safe_answer and "|" in safe_answer and safe_answer.count("\n") > 2:
+                        yield pn.pane.Markdown(safe_answer)
+                    else:
+                        yield safe_answer if safe_answer else "(no response)"
         except Exception as e:
             status.object = f"Error: {e}"
             yield f"Error: {e}"
