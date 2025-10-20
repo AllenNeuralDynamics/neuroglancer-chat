@@ -5,6 +5,7 @@ from panel.chat import ChatInterface
 from panel_neuroglancer import Neuroglancer
 import polars as pl
 import pandas as pd
+import logging
 
 # Import pointer expansion functionality
 from neurogabber.backend.tools.pointer_expansion import (
@@ -13,7 +14,7 @@ from neurogabber.backend.tools.pointer_expansion import (
 )
 
 # setup debug logging
-import logging
+
 FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 def reconfig_basic_config(format_=FORMAT, level=logging.INFO):
     """(Re-)configure logging"""
@@ -44,6 +45,8 @@ status = pn.pane.Markdown("Ready.")
 
 # Track last loaded Neuroglancer URL (dedupe reloads)
 last_loaded_url: str | None = None
+_trace_history = []
+_full_table_data = {}  # Store full table data for modal: {message_id: full_table_text}
 
 # Mutation detection now handled server-side; state link returned directly when mutated.
 
@@ -212,6 +215,8 @@ async def agent_call(prompt: str) -> dict:
         mutated = bool(data.get("mutated"))
         state_link = data.get("state_link") or {}
         tool_trace = data.get("tool_trace") or []
+        query_data = data.get("query_data")  # Raw query result from backend
+        
         return {
             "answer": answer or "(no response)",
             "mutated": mutated,
@@ -220,7 +225,174 @@ async def agent_call(prompt: str) -> dict:
             "tool_trace": tool_trace,
             "views_table": data.get("views_table"),
             "ng_views": ng_views,
+            "ng_views_raw": ng_views,  # Keep raw ng_views for Tabulator rendering
+            "query_data": query_data,  # Pass through query_data for direct rendering
         }
+
+
+# Removed _truncate_table_columns - Tabulator handles wide tables with horizontal scrolling
+
+def _create_tabulator_from_query_data(query_data: dict) -> pn.widgets.Tabulator:
+    """Create Tabulator widget directly from backend query_data structure.
+    
+    Args:
+        query_data: Dict with keys: data (dict of lists), columns, ng_views, etc.
+    
+    Returns:
+        Panel Tabulator widget
+    """
+    import pandas as pd
+    
+    # Extract data
+    data_dict = query_data.get("data", {})
+    columns = query_data.get("columns", [])
+    ng_views = query_data.get("ng_views", [])
+    
+    if not data_dict or not columns:
+        return pn.pane.Markdown("*No data to display*")
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(data_dict)
+    
+    # If no ng_views, return simple tabulator
+    if not ng_views:
+        return pn.widgets.Tabulator(
+            df,
+            disabled=True,
+            show_index=False,
+            sizing_mode="stretch_width",
+            height=min(400, len(df) * 35 + 50),
+            layout="fit_data_table",
+            pagination="local" if len(df) > 20 else None,
+            page_size=20,
+        )
+    
+    # Create URL mapping for ng_views
+    url_map = {view["row_index"]: view["url"] for view in ng_views if "row_index" in view and "url" in view}
+    
+    # Add _ng_url column for View buttons at the end
+    df['_ng_url'] = df.index.map(lambda i: url_map.get(i, ""))
+    
+    # Reorder columns to put _ng_url last
+    cols = [c for c in df.columns if c != '_ng_url'] + ['_ng_url']
+    df = df[cols]
+    
+    # Create Tabulator with button formatter
+    tabulator = pn.widgets.Tabulator(
+        df,
+        disabled=False,
+        show_index=False,
+        sizing_mode="stretch_width",
+        height=min(400, len(df) * 35 + 50),
+        layout="fit_data_table",
+        pagination="local" if len(df) > 20 else None,
+        page_size=20,
+        buttons={'_ng_url': '<i class="fa fa-eye"></i>'},
+        titles={'_ng_url': 'View'},
+        hidden_columns=[],
+        widths={'_ng_url': 60},  # Narrow column, just wide enough for icon button
+    )
+    
+    # Set up click handler
+    def on_click(event):
+        if event.column == '_ng_url' and event.row is not None:
+            try:
+                url = df.iloc[event.row]['_ng_url']
+                if url:
+                    _load_internal_link(url)
+            except Exception as e:
+                logger.error(f"Error loading neuroglancer link: {e}")
+    
+    tabulator.on_click(on_click)
+    
+    return tabulator
+
+
+def _create_tabulator_from_markdown(text: str, ng_views: list = None, max_rows: int = 500) -> pn.widgets.Tabulator:
+    """Convert markdown table to interactive Tabulator widget with clickable View buttons.
+    
+    Args:
+        text: Markdown table text
+        ng_views: List of {"row_index": i, "url": "https://..."} from backend
+        max_rows: Maximum rows to display
+    
+    Returns:
+        Panel Tabulator widget with clickable View buttons
+    """
+    import pandas as pd
+    
+    # Parse markdown table
+    lines = [l.strip() for l in text.split("\n") if "|" in l]
+    if len(lines) < 2:
+        return pn.pane.Markdown(text)  # Not a table
+    
+    # Extract header
+    header_parts = [p.strip() for p in lines[0].split("|") if p.strip()]
+    
+    # Skip separator line, extract data rows
+    data_rows = []
+    for line in lines[2:]:
+        parts = [p.strip() for p in line.split("|") if p.strip()]
+        # Skip separator-like lines
+        if all(c in "-:|" for p in parts for c in p.replace(" ", "")):
+            continue
+        if len(parts) == len(header_parts):
+            data_rows.append(parts)
+    
+    if not data_rows:
+        return pn.pane.Markdown(text)
+    
+    # Create DataFrame
+    df = pd.DataFrame(data_rows[:max_rows], columns=header_parts)
+    
+    # If no ng_views, return simple tabulator
+    if not ng_views:
+        return pn.widgets.Tabulator(
+            df,
+            disabled=True,
+            show_index=False,
+            sizing_mode="stretch_width",
+            height=min(300, len(df) * 35 + 40),
+        )
+    
+    # Create URL mapping
+    url_map = {view["row_index"]: view["url"] for view in ng_views if "row_index" in view and "url" in view}
+    
+    # Remove existing View column if present (contains markdown link text)
+    if 'View' in df.columns:
+        df = df.drop(columns=['View'])
+    
+    # Add _ng_url column with URLs for button formatter
+    df['_ng_url'] = df.index.map(lambda i: url_map.get(i, ""))
+    
+    # Reorder columns to put _ng_url last
+    cols = [c for c in df.columns if c != '_ng_url'] + ['_ng_url']
+    df = df[cols]
+    
+    # Create Tabulator with button formatter for View column
+    tabulator = pn.widgets.Tabulator(
+        df,
+        disabled=False,  # Enable interaction
+        show_index=False,
+        sizing_mode="stretch_width",
+        height=min(400, len(df) * 35 + 40),
+        buttons={'_ng_url': '<i class="fa fa-eye"></i>'},
+        titles={'_ng_url': 'View'},  # Column header for the button column
+        hidden_columns=[],  # Don't hide _ng_url - it becomes the visible View button column
+        widths={'_ng_url': 60},  # Narrow column, just wide enough for icon button
+    )
+    
+    # Set up click handler for view buttons
+    def on_click(event):
+        if event.column == '_ng_url' and event.row is not None:
+            url = df.iloc[event.row]['_ng_url']
+            if url:
+                _load_internal_link(url)
+    
+    tabulator.on_click(on_click)
+    
+    return tabulator
+
 
 def _enhance_table_with_ng_views(text: str, ng_views: list) -> str:
     """Enhance markdown table by adding View column with clickable links.
@@ -424,6 +596,8 @@ async def respond(contents: str, user: str, **kwargs):
             link = result.get("url")
             mutated = bool(result.get("mutated"))
             safe_answer = _mask_client_side(result.get("answer")) if result.get("answer") else None
+            ng_views_data = result.get("ng_views_raw")  # Raw ng_views for Tabulator rendering
+            query_data = result.get("query_data")  # Raw query result from backend for direct rendering
             trace = result.get("tool_trace") or []
             vt = result.get("views_table")
             if trace:
@@ -566,10 +740,76 @@ async def respond(contents: str, user: str, **kwargs):
                     else:
                         yield pn.Column(embedded_table_component, sizing_mode="stretch_width")
                 else:
+                    # Check if we have query_data for direct Tabulator rendering
+                    logger.info(f"Checking query_data: present={query_data is not None}, type={type(query_data) if query_data else 'None'}")
+                    if query_data:
+                        logger.info(f"query_data keys: {list(query_data.keys()) if isinstance(query_data, dict) else 'not a dict'}")
+                        if isinstance(query_data, dict):
+                            logger.info(f"query_data['data'] present: {'data' in query_data}, rows: {query_data.get('rows')}")
+                    
+                    if query_data and isinstance(query_data, dict) and query_data.get("data"):
+                        # Backend provided structured data - render directly as Tabulator
+                        logger.info(f"✅ Rendering Tabulator from query_data: {query_data.get('rows')} rows")
+                        tabulator_widget = _create_tabulator_from_query_data(query_data)
+                        
+                        # Create workspace button
+                        workspace_button = pn.widgets.Button(
+                            name="📊 Add to Workspace",
+                            button_type="primary",
+                            sizing_mode="fixed",
+                            width=150,
+                            margin=(5, 0)
+                        )
+                        
+                        # Capture data in closure
+                        captured_data = query_data
+                        
+                        def add_to_workspace(event):
+                            _add_result_to_workspace_from_data(captured_data)
+                            workspace_button.name = "✓ Added to Workspace"
+                            workspace_button.button_type = "success"
+                            workspace_button.disabled = True
+                        
+                        workspace_button.on_click(add_to_workspace)
+                        
+                        # Yield LLM text (expression + context) + Tabulator + button
+                        yield pn.Column(
+                            pn.pane.Markdown(safe_answer) if safe_answer else pn.Spacer(height=0),
+                            tabulator_widget,
+                            workspace_button,
+                            sizing_mode="stretch_width"
+                        )
                     # Check if safe_answer contains a table (has pipe characters in multiple lines)
-                    # If so, wrap in Markdown pane to ensure proper rendering
-                    if safe_answer and "|" in safe_answer and safe_answer.count("\n") > 2:
-                        yield pn.pane.Markdown(safe_answer)
+                    elif safe_answer and "|" in safe_answer and safe_answer.count("\n") > 2:
+                        # Legacy: LLM generated markdown table
+                        tabulator_widget = _create_tabulator_from_markdown(safe_answer, ng_views_data)
+                        
+                        # Create "Add to Workspace" button
+                        workspace_button = pn.widgets.Button(
+                            name="📊 Add to Workspace",
+                            button_type="primary",
+                            sizing_mode="fixed",
+                            width=150,
+                            margin=(5, 0)
+                        )
+                        
+                        # Capture table and ng_views in closure
+                        captured_table = safe_answer
+                        captured_ng_views = ng_views_data
+                        
+                        def add_to_workspace(event):
+                            _add_result_to_workspace(captured_table, captured_ng_views)
+                            workspace_button.name = "✓ Added to Workspace"
+                            workspace_button.button_type = "success"
+                            workspace_button.disabled = True
+                        
+                        workspace_button.on_click(add_to_workspace)
+                        
+                        yield pn.Column(
+                            tabulator_widget,
+                            workspace_button,
+                            sizing_mode="stretch_width"
+                        )
                     else:
                         yield safe_answer if safe_answer else "(no response)"
         except Exception as e:
@@ -795,8 +1035,114 @@ upload_card = pn.Card(
 _update_upload_card_title(0)
 
 
+# Workspace results management
+workspace_results_list = []  # Track result cards for management
+
+def _add_result_to_workspace_from_data(query_data: dict, query_summary: str = None):
+    """Add a query result card to the workspace from structured query_data.
+    
+    Args:
+        query_data: Dict with data, columns, ng_views from backend
+        query_summary: Optional summary like '10 rows × 14 columns'
+    """
+    global workspace_results_list
+    
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    
+    # Generate summary if not provided
+    if not query_summary:
+        rows = query_data.get("rows", 0)
+        cols = len(query_data.get("columns", []))
+        query_summary = f"{rows} rows × {cols} columns"
+    
+    # Create Tabulator widget directly from data
+    tabulator_widget = _create_tabulator_from_query_data(query_data)
+    
+    # Create collapsible card
+    result_card = pn.Card(
+        tabulator_widget,
+        title=f"📊 Query @ {timestamp} - {query_summary}",
+        collapsed=False,
+        sizing_mode="stretch_width",
+        margin=(0, 0, 10, 0),
+        header_background="#2b3e50",
+    )
+    
+    # Add to container
+    workspace_results_container.append(result_card)
+    workspace_results_list.append(result_card)
+    
+    # Expand workspace card
+    workspace_card.collapsed = False
+    
+    # Limit to last 10 results
+    if len(workspace_results_list) > 10:
+        oldest = workspace_results_list.pop(0)
+        workspace_results_container.remove(oldest)
+    
+    # Update header
+    workspace_header.object = f"### Query Results ({len(workspace_results_list)})\n_Click card headers to collapse/expand._"
+
+
+def _add_result_to_workspace(full_table_text: str, ng_views_data: list = None, query_summary: str = None):
+    """Add a query result card to the workspace.
+    
+    Args:
+        full_table_text: Full table markdown text
+        ng_views_data: List of ng_views data for interactive buttons
+        query_summary: Optional summary like '10 rows × 14 columns'
+    """
+    global workspace_results_list
+    
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    
+    # Count rows and columns from table
+    if not query_summary:
+        lines = [l for l in full_table_text.split("\n") if "|" in l]
+        if len(lines) >= 2:
+            header_parts = [p.strip() for p in lines[0].split("|") if p.strip()]
+            data_lines = [l for l in lines[2:] if not all(c in "-:|" for c in l.replace(" ", ""))]
+            query_summary = f"{len(data_lines)} rows × {len(header_parts)} columns"
+    
+    # Create card content with Tabulator widget
+    tabulator_widget = _create_tabulator_from_markdown(full_table_text, ng_views_data)
+    card_content = pn.Column(
+        tabulator_widget,
+        sizing_mode="stretch_width",
+    )
+    
+    # Create collapsible card
+    result_card = pn.Card(
+        card_content,
+        title=f"📊 Query @ {timestamp} - {query_summary or 'results'}",
+        collapsed=False,  # Start expanded
+        sizing_mode="stretch_width",
+        margin=(0, 0, 10, 0),
+        header_background="#2b3e50",
+    )
+    
+    # Add to container
+    workspace_results_container.append(result_card)
+    workspace_results_list.append(result_card)
+    
+    # Expand workspace card
+    workspace_card.collapsed = False
+    
+    # Limit to last 10 results
+    if len(workspace_results_list) > 10:
+        oldest = workspace_results_list.pop(0)
+        workspace_results_container.remove(oldest)
+    
+    # Update header
+    workspace_header.object = f"### Query Results ({len(workspace_results_list)})\n_Click card headers to collapse/expand._"
+workspace_header = pn.pane.Markdown("### Query Results\n_Full tables and visualizations appear here._", margin=(0, 0, 10, 0))
+workspace_results_container = pn.Column(sizing_mode="stretch_width")
+
 workspace_body = pn.Column(
-    pn.pane.Markdown("### Workspace\n_Add notes, context, or future controls here._"),
+    workspace_header,
+    workspace_results_container,
     sizing_mode="stretch_width",
     scroll=True,
 )

@@ -1,0 +1,94 @@
+"""
+INTERACTIVE VIEW LINKS - IMPLEMENTATION SUMMARY
+================================================
+
+PROBLEM:
+--------
+View links in markdown tables opened new browser tabs instead of updating
+the current Neuroglancer viewer.
+
+SOLUTION:
+---------
+Created interactive table widgets with clickable Panel buttons that call
+_load_internal_link(url) to update the viewer state directly.
+
+WHAT WAS CHANGED:
+-----------------
+
+1. **_create_interactive_table() Function**
+   - Parses markdown table with ng_views data
+   - Creates Panel Button widgets for each View link
+   - Each button has onclick callback: _load_internal_link(url)
+   - Returns Panel Column with table + button row
+
+2. **Enhanced _add_result_to_workspace()**
+   - Now accepts ng_views_data parameter
+   - Uses _create_interactive_table() if ng_views present
+   - Falls back to markdown if no ng_views
+
+3. **Updated Response Flow**
+   - agent_call() returns "ng_views_raw" in result dict
+   - respond() extracts ng_views_data from result
+   - Button callback passes ng_views_data to workspace function
+   - Workspace cards render interactive tables
+
+4. **Button Behavior**
+   - Click "View" button → calls _load_internal_link(url)
+   - Viewer state updates programmatically
+   - No new tabs opened
+   - Uses existing viewer synchronization logic
+
+UX IMPROVEMENTS:
+----------------
+
+BEFORE:
+  User clicks [view](url) link
+    ↓
+  Opens new browser tab with Neuroglancer
+    ↓
+  Multiple tabs accumulate
+  
+AFTER:
+  User clicks [View] button
+    ↓
+  Calls _load_internal_link(url)
+    ↓
+  Viewer state updates in current window
+    ↓
+  Backend syncs via _notify_backend_state_load()
+    ↓
+  Clean, single-window experience
+
+EXAMPLE WORKSPACE CARD:
+-----------------------
+┌─────────────────────────────────────────┐
+│ ▼ 📊 Query @ 12:34:56 - 10×14 cols     │
+├─────────────────────────────────────────┤
+│ | id | x  | y  | z | val | View |      │
+│ | 1  | 100| 200| 10| 5.5 | [link]|      │
+│ | 2  | 110| 210| 20| 6.5 | [link]|      │
+│                                          │
+│ **View Links:**                         │
+│ [View] [View] [View]  ← Clickable!      │
+│ (Updates viewer when clicked)           │
+└─────────────────────────────────────────┘
+
+TECHNICAL DETAILS:
+------------------
+- Uses Panel Button widgets with on_click callbacks
+- Closure captures URL for each button
+- Leverages existing _load_internal_link() function
+- Works with _programmatic_viewer_update() context manager
+- Maintains state sync with backend
+
+BENEFITS:
+---------
+✅ No new tabs opened
+✅ Single Neuroglancer viewer instance
+✅ Immediate state updates
+✅ Clean user experience
+✅ Works in both chat and workspace
+✅ Maintains all existing functionality
+"""
+
+print(__doc__)

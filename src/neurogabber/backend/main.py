@@ -438,6 +438,7 @@ def chat(req: ChatRequest):
     full_trace_steps = []  # full detail trace retained server-side
     aggregated_views_table = None
     aggregated_ng_views = None  # Track ng_views from data_query_polars
+    aggregated_query_data = None  # Track full data result from data_query_polars for frontend rendering
 
     timing.start_agent_loop()
     
@@ -503,11 +504,23 @@ def chat(req: ChatRequest):
             
             _dbg(f"Tool '{fn}' result keys={list(result_payload.keys())}")
             
-            # Capture ng_views from data_query_polars for frontend rendering
-            if fn == "data_query_polars" and isinstance(result_payload, dict):
-                if "ng_views" in result_payload:
-                    aggregated_ng_views = result_payload["ng_views"]
-                    _dbg(f"Captured ng_views: {len(aggregated_ng_views)} views for frontend rendering")
+            # Capture full query result from data_query_polars for frontend rendering
+            if fn == "data_query_polars":
+                _dbg(f"data_query_polars result: ok={result_payload.get('ok')}, type={type(result_payload)}")
+                if isinstance(result_payload, dict) and "ok" in result_payload and result_payload["ok"]:
+                    # Store the complete query result for frontend
+                    aggregated_query_data = {
+                        "data": result_payload["data"],
+                        "columns": result_payload["columns"],
+                        "rows": result_payload["rows"],
+                        "expression": result_payload.get("expression"),
+                        "ng_views": result_payload.get("ng_views"),
+                        "spatial_columns": result_payload.get("spatial_columns"),
+                    }
+                    aggregated_ng_views = result_payload.get("ng_views")
+                    _dbg(f"✅ Captured query data: {result_payload['rows']} rows, {len(result_payload['columns'])} columns for frontend rendering")
+                else:
+                    _dbg(f"❌ data_query_polars result not captured - ok={result_payload.get('ok')}, keys={list(result_payload.keys())}")
             
             if fn == "data_ng_views_table" and isinstance(result_payload, dict):
                 if "error" in result_payload and "rows" not in result_payload:
@@ -640,12 +653,14 @@ def chat(req: ChatRequest):
         "tool_trace": tool_execution_records,
         "views_table": aggregated_views_table,
         "ng_views": aggregated_ng_views,  # Expose ng_views for frontend rendering
+        "query_data": aggregated_query_data,  # Expose full query result for frontend Tabulator rendering
     }
     
     timing.mark("response_sent")
     timing.finalize()
     
     _dbg(f"Returning payload mutated={overall_mutated} state_link?={bool(state_link_block)} views_table_rows={len((aggregated_views_table or {}).get('rows', [])) if aggregated_views_table else 0}")
+    _dbg(f"query_data present: {aggregated_query_data is not None}, rows: {aggregated_query_data.get('rows') if aggregated_query_data else 'N/A'}")
     return final_payload
 
 
