@@ -46,17 +46,32 @@ Dataframe rules - ACTION REQUIRED:
 - If you want to reuse a query result, use save_as parameter to store it as a summary table, then reference it with summary_id in subsequent queries.
 - ⚠️ CRITICAL: When you receive tool results from data_query_polars, DO NOT format, summarize, or display the data in ANY way.
   * The tool returns "data" in a structured format that goes DIRECTLY to the frontend
-  * The frontend automatically renders an interactive table widget - you don't need to show the data
+  * The frontend automatically renders an interactive table widget with the expression displayed above it
   * Your ONLY job after a data_query_polars tool call:
-    1. Show the Polars expression in a Python code block: ```python\n{expression}\n```
-    2. ONE brief sentence of context (optional): "Here are the top 10 cells:"
-    3. That's it! STOP. Do not list rows, do not format data, do not create text representations.
+    - Provide ONE brief sentence of context (optional): "Here are the top 20 unique cluster_id values."
+    - That's it! STOP. The frontend will show the expression and table automatically.
+  * ❌ NEVER show the Polars expression in a code block (frontend handles this)
   * ❌ NEVER write things like: "cell_id: 91500 | volume_um: 1530.6 | ..."
   * ❌ NEVER create markdown tables with | ... |
   * ❌ NEVER list individual data values
-  * ✅ CORRECT example: "```python\ndf.sort('volume_um', descending=True).head(10)\n```\n\nShowing the top 10 cells by volume."
-  * ✅ That's ALL you need to say - the table appears automatically!
+  * ✅ CORRECT example: "Here are the top 20 unique values in cluster_id (as requested by the tool)."
+  * ✅ Keep it brief - the expression and table appear automatically!
 - If the result includes "ng_views" field, you can add: "(View links available)" but don't construct URLs or links.
+
+Plotting rules - ACTION REQUIRED:
+- ⚠️ CRITICAL: ANY request with "plot", "graph", "visualize", "chart", "scatter", "scatterplot", "scatter plot", "lineplot", "line plot", "barplot", "bar plot", "heatmap" → call data_plot immediately (NOT data_query_polars).
+- Use data_plot for ALL visualization requests, even with sampling or filtering.
+- If data needs transformation (sampling, filtering, aggregation), provide `expression` parameter with Polars query.
+- Example 1: "sample 20 cells and scatterplot log_volume vs elongation"
+  → Call data_plot with: expression='df.sample(20)', plot_type='scatter', x='log_volume', y='elongation'
+- Example 2: "plot mean log_volume for cluster labels with elongation > 0.5"
+  → Call data_plot with: expression='df.filter(pl.col("elongation") > 0.5).group_by("cluster_id").agg(pl.mean("log_volume"))', plot_type='bar', x='cluster_id', y='log_volume'
+- For scatter plots from raw data without transformation, omit expression.
+- Common plot types: scatter (x/y points), line (trends), bar (categorical comparisons), heatmap (matrix).
+- ⚠️ CRITICAL: After data_plot returns, DO NOT describe the plot or summarize data. The frontend renders it automatically.
+  * Just say: "Here's your plot." or similar single sentence.
+  * The interactive plot appears automatically in the Panel UI.
+- ALWAYS include spatial columns in expressions when aggregating data (x, y, z or centroid_x, centroid_y, centroid_z) to enable future Neuroglancer click-to-view features.
 
 Conversation context awareness:
 - If you just returned data/results in the previous response, the user's next question likely refers to that data.
@@ -301,6 +316,47 @@ DATA_TOOLS = [
         },
         "required": ["expression"]
       }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "data_plot",
+      "description": "Generate interactive plot (scatter/line/bar/heatmap) from dataframe. Can apply Polars expression first to transform data. Returns embeddable plot HTML. Spatial columns (x,y,z) are automatically preserved for future Neuroglancer click-to-view features.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_id": {"type": "string", "description": "Source file ID (provide file_id OR summary_id)"},
+          "summary_id": {"type": "string", "description": "Source summary table ID (mutually exclusive with file_id)"},
+          "plot_type": {
+            "type": "string",
+            "enum": ["scatter", "line", "bar", "heatmap"],
+            "description": "Type of plot: scatter (x/y points), line (trends), bar (categorical comparisons), heatmap (matrix)"
+          },
+          "x": {"type": "string", "description": "X-axis column name (required)"},
+          "y": {"type": "string", "description": "Y-axis column name (required)"},
+          "by": {"type": "string", "description": "Grouping column - creates multiple series/colors"},
+          "size": {"type": "string", "description": "Column for point size (scatter only)"},
+          "color": {"type": "string", "description": "Column for point color (scatter only)"},
+          "stacked": {"type": "boolean", "default": False, "description": "Stack bars side-by-side (bar plot only, default is grouped/side-by-side bars)"},
+          "title": {"type": "string", "description": "Plot title"},
+          "expression": {
+            "type": "string",
+            "description": "Optional Polars expression to transform data before plotting. IMPORTANT: Always include spatial columns (x,y,z or centroid_x,centroid_y,centroid_z) in aggregations. Example: 'df.filter(pl.col(\"elongation\") > 0.5).group_by(\"cluster_id\").agg(pl.mean(\"log_volume\"), pl.first(\"x\"), pl.first(\"y\"), pl.first(\"z\"))'"
+          },
+          "save_plot": {"type": "boolean", "default": True, "description": "Store plot in workspace"},
+          "interactive_override": {"type": "boolean", "description": "Force interactive on/off (default: auto, interactive if ≤200 points)"}
+        },
+        "required": ["plot_type", "x", "y"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "data_list_plots",
+      "description": "List all generated plots in the workspace with metadata.",
+      "parameters": {"type": "object", "properties": {}}
     }
   },
 ]

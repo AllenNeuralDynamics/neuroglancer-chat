@@ -1,5 +1,6 @@
 import uuid
 from typing import Dict, List, Optional
+from datetime import datetime
 
 import polars as pl
 
@@ -51,12 +52,43 @@ class SummaryRecord:
         }
 
 
+class PlotRecord:
+    """Record of a generated plot with metadata."""
+    def __init__(
+        self,
+        plot_id: str,
+        source_id: str,
+        plot_type: str,
+        plot_html: str,
+        plot_spec: dict,
+        expression: Optional[str] = None,
+    ):
+        self.plot_id = plot_id
+        self.source_id = source_id  # file_id or summary_id
+        self.plot_type = plot_type
+        self.plot_html = plot_html
+        self.plot_spec = plot_spec  # {x, y, by, size, color, etc.}
+        self.expression = expression  # Optional Polars query used to prep data
+        self.created_at = datetime.now()
+    
+    def to_meta(self) -> dict:
+        return {
+            "plot_id": self.plot_id,
+            "source_id": self.source_id,
+            "plot_type": self.plot_type,
+            "plot_spec": self.plot_spec,
+            "expression": self.expression,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
 class DataMemory:
     """Ephemeral session-scoped data store for uploaded CSVs & derived summaries."""
 
     def __init__(self):
         self.files: Dict[str, UploadedFileRecord] = {}
         self.summaries: Dict[str, SummaryRecord] = {}
+        self.plots: Dict[str, PlotRecord] = {}
 
     def add_file(self, name: str, raw: bytes) -> dict:
         if len(raw) > MAX_FILE_BYTES:
@@ -98,6 +130,30 @@ class DataMemory:
         if summary_id not in self.summaries:
             raise KeyError(f"Unknown summary_id: {summary_id}")
         return self.summaries[summary_id]
+
+    def add_plot(
+        self, 
+        source_id: str, 
+        plot_type: str, 
+        plot_html: str, 
+        plot_spec: dict, 
+        expression: Optional[str] = None
+    ) -> dict:
+        """Store a generated plot and return metadata."""
+        plot_id = uuid.uuid4().hex[:8]
+        rec = PlotRecord(plot_id, source_id, plot_type, plot_html, plot_spec, expression)
+        self.plots[plot_id] = rec
+        return rec.to_meta()
+
+    def list_plots(self) -> List[dict]:
+        """List all generated plots (metadata only, no HTML)."""
+        return [rec.to_meta() for rec in self.plots.values()]
+
+    def get_plot(self, plot_id: str) -> PlotRecord:
+        """Retrieve full plot record including HTML."""
+        if plot_id not in self.plots:
+            raise KeyError(f"Unknown plot_id: {plot_id}")
+        return self.plots[plot_id]
 
 
 class InteractionMemory:

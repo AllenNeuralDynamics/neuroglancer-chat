@@ -52,6 +52,7 @@ _full_table_data = {}  # Store full table data for modal: {message_id: full_tabl
 
 # Settings widgets
 auto_load_checkbox = pn.widgets.Checkbox(name="Auto-load view", value=True)
+show_query_tables = pn.widgets.Checkbox(name="Show query tables in plots", value=False)
 latest_url = pn.widgets.TextInput(name="Latest NG URL", value="", disabled=True)
 update_state_interval = pn.widgets.IntInput(name="Update state interval (sec)", value=5, start=1)
 trace_history_checkbox = pn.widgets.Checkbox(name="Trace history", value=True)
@@ -216,6 +217,7 @@ async def agent_call(prompt: str) -> dict:
         state_link = data.get("state_link") or {}
         tool_trace = data.get("tool_trace") or []
         query_data = data.get("query_data")  # Raw query result from backend
+        plot_data = data.get("plot_data")  # Raw plot result from backend
         
         return {
             "answer": answer or "(no response)",
@@ -227,6 +229,7 @@ async def agent_call(prompt: str) -> dict:
             "ng_views": ng_views,
             "ng_views_raw": ng_views,  # Keep raw ng_views for Tabulator rendering
             "query_data": query_data,  # Pass through query_data for direct rendering
+            "plot_data": plot_data,  # Pass through plot_data for direct rendering
         }
 
 
@@ -598,6 +601,7 @@ async def respond(contents: str, user: str, **kwargs):
             safe_answer = _mask_client_side(result.get("answer")) if result.get("answer") else None
             ng_views_data = result.get("ng_views_raw")  # Raw ng_views for Tabulator rendering
             query_data = result.get("query_data")  # Raw query result from backend for direct rendering
+            plot_data = result.get("plot_data")  # Plot result from backend for rendering
             trace = result.get("tool_trace") or []
             vt = result.get("views_table")
             if trace:
@@ -750,7 +754,30 @@ async def respond(contents: str, user: str, **kwargs):
                     if query_data and isinstance(query_data, dict) and query_data.get("data"):
                         # Backend provided structured data - render directly as Tabulator
                         logger.info(f"✅ Rendering Tabulator from query_data: {query_data.get('rows')} rows")
-                        tabulator_widget = _create_tabulator_from_query_data(query_data)
+                        
+                        # Check if we also have plot_data - if so, skip table unless show_query_tables is True
+                        tabulator_widget = None
+                        if plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
+                            if not show_query_tables.value:
+                                logger.info("Skipping query table rendering because plot_data is present and show_query_tables=False")
+                                # Skip the table, let the plot rendering happen in the elif below
+                            else:
+                                # Show both table and plot
+                                tabulator_widget = _create_tabulator_from_query_data(query_data)
+                        else:
+                            # No plot data, always create the table
+                            tabulator_widget = _create_tabulator_from_query_data(query_data)
+                        
+                        # Extract and display the Polars expression
+                        expression = query_data.get("expression", "")
+                        expression_display = None
+                        if expression:
+                            # Format expression in a code block
+                            expression_display = pn.pane.Markdown(
+                                f"```python\n{expression}\n```",
+                                sizing_mode="stretch_width",
+                                margin=(5, 5, 10, 5)
+                            )
                         
                         # Create workspace button
                         workspace_button = pn.widgets.Button(
@@ -772,13 +799,158 @@ async def respond(contents: str, user: str, **kwargs):
                         
                         workspace_button.on_click(add_to_workspace)
                         
-                        # Yield LLM text (expression + context) + Tabulator + button
+                        # Build components to display
+                        components = []
+                        
+                        # Add LLM context if present (strip out code blocks since expression is shown separately)
+                        if safe_answer and safe_answer.strip():
+                            llm_text = safe_answer.strip()
+                            
+                            # Remove code blocks (expression is rendered separately by frontend)
+                            import re
+                            llm_text = re.sub(r'```[a-z]*\n.*?\n```', '', llm_text, flags=re.DOTALL)
+                            llm_text = llm_text.strip()
+                            
+                            # Filter out if it looks like the LLM is listing data rows
+                            # (has many lines with colons indicating key-value pairs)
+                            if llm_text:
+                                line_count = llm_text.count("\n")
+                                colon_count = llm_text.count(":")
+                                # If it has many colons and lines, it's probably formatting data
+                                if not (line_count > 5 and colon_count > line_count):
+                                    components.append(pn.pane.Markdown(llm_text, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
+                        
+                        # Always add expression display (already created above)
+                        if expression_display:
+                            components.append(expression_display)
+                        
+                        # Add table and button (only if table was created)
+                        if tabulator_widget is not None:
+                            components.append(tabulator_widget)
+                        components.append(workspace_button)
+                        
+                        # Return all components in a column
                         yield pn.Column(
-                            pn.pane.Markdown(safe_answer) if safe_answer else pn.Spacer(height=0),
-                            tabulator_widget,
-                            workspace_button,
+                            *components,
                             sizing_mode="stretch_width"
                         )
+                    # Check if we have plot_data for direct plot rendering
+                    elif plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
+                        # Backend provided plot spec - render natively with hvplot
+                        logger.info(f"✅ Rendering plot from plot_data: type={plot_data.get('plot_type')}, interactive={plot_data.get('is_interactive')}")
+                        
+                        # Fetch the dataframe from backend to recreate plot
+                        try:
+                            source_id = plot_data.get("source_id")
+                            plot_kwargs = plot_data.get("plot_kwargs", {})
+                            plot_type = plot_data.get("plot_type", "scatter")
+                            expression = plot_data.get("expression", "")
+                            
+                            # Fetch data from backend
+                            async with httpx.AsyncClient(timeout=30) as client:
+                                # Determine if source is file or summary
+                                if source_id:
+                                    # Try to get the dataframe data via preview endpoint
+                                    preview_resp = await client.post(
+                                        f"{BACKEND}/tools/data_preview",
+                                        json={"file_id": source_id, "n": 10000}  # Get up to 10k rows for plotting
+                                    )
+                                    preview_data = preview_resp.json()
+                                    
+                                    if "rows" in preview_data:
+                                        # Convert to polars dataframe for hvplot
+                                        import polars as pl
+                                        df = pl.DataFrame(preview_data["rows"])
+                                        
+                                        # Import hvplot.polars to enable .hvplot accessor
+                                        import hvplot.polars
+                                        
+                                        # Create the plot using hvplot
+                                        if plot_type == "scatter":
+                                            plot = df.hvplot.scatter(**plot_kwargs)
+                                        elif plot_type == "line":
+                                            plot = df.hvplot.line(**plot_kwargs)
+                                        elif plot_type == "bar":
+                                            plot = df.hvplot.bar(**plot_kwargs)
+                                        elif plot_type == "heatmap":
+                                            plot = df.hvplot.heatmap(**plot_kwargs)
+                                        else:
+                                            plot = df.hvplot(**plot_kwargs)
+                                        
+                                        # Wrap in Panel's HoloViews pane for native rendering
+                                        plot_pane = pn.pane.HoloViews(
+                                            object=plot,
+                                            sizing_mode="stretch_both",
+                                            min_height=400
+                                        )
+                                        
+                                        # Build components
+                                        components = []
+                                        
+                                        # Add LLM context if present
+                                        if safe_answer and safe_answer.strip():
+                                            llm_text = safe_answer.strip()
+                                            import re
+                                            llm_text = re.sub(r'```[a-z]*\n.*?\n```', '', llm_text, flags=re.DOTALL)
+                                            llm_text = llm_text.strip()
+                                            if llm_text:
+                                                components.append(pn.pane.Markdown(llm_text, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
+                                        
+                                        # Add expression if present
+                                        if expression:
+                                            expression_display = pn.pane.Markdown(
+                                                f"**Data transformation:**\n```python\n{expression}\n```",
+                                                sizing_mode="stretch_width",
+                                                margin=(5, 5, 10, 5)
+                                            )
+                                            components.append(expression_display)
+                                        
+                                        # Add plot info
+                                        plot_info = f"**{plot_type.capitalize()}** plot • "
+                                        plot_info += f"{'Interactive' if plot_data.get('is_interactive') else 'Static'} • "
+                                        plot_info += f"{plot_data.get('row_count', 0)} points"
+                                        components.append(pn.pane.Markdown(plot_info, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
+                                        
+                                        # Add the plot
+                                        components.append(plot_pane)
+                                        
+                                        # Add workspace button
+                                        workspace_button = pn.widgets.Button(
+                                            name="📊 Add Plot to Workspace",
+                                            button_type="primary",
+                                            sizing_mode="fixed",
+                                            width=180,
+                                            margin=(5, 0)
+                                        )
+                                        
+                                        # Capture plot info in closure
+                                        captured_plot_pane = plot_pane
+                                        captured_plot_type = plot_type
+                                        captured_x = plot_kwargs.get('x', '')
+                                        captured_y = plot_kwargs.get('y', '')
+                                        plot_summary = f"{captured_x} vs {captured_y}" if captured_x and captured_y else None
+                                        
+                                        def add_plot_to_workspace(event):
+                                            _add_plot_to_workspace(captured_plot_pane, captured_plot_type, plot_summary)
+                                            workspace_button.name = "✓ Added to Workspace"
+                                            workspace_button.button_type = "success"
+                                            workspace_button.disabled = True
+                                        
+                                        workspace_button.on_click(add_plot_to_workspace)
+                                        components.append(workspace_button)
+                                        
+                                        # Return all components
+                                        yield pn.Column(
+                                            *components,
+                                            sizing_mode="stretch_width"
+                                        )
+                                    else:
+                                        yield f"Error: Could not fetch data for plotting: {preview_data.get('error', 'Unknown error')}"
+                                else:
+                                    yield "Error: No source_id provided for plot data"
+                        except Exception as e:
+                            logger.exception("Failed to render plot")
+                            yield f"Error rendering plot: {str(e)}"
                     # Check if safe_answer contains a table (has pipe characters in multiple lines)
                     elif safe_answer and "|" in safe_answer and safe_answer.count("\n") > 2:
                         # Legacy: LLM generated markdown table
@@ -850,6 +1022,7 @@ chat = ChatInterface(
 settings_card = pn.Card(
     pn.Column(
         auto_load_checkbox,
+        show_query_tables,
         latest_url,
         open_latest_btn,
         ng_links_internal,
@@ -1137,6 +1310,51 @@ def _add_result_to_workspace(full_table_text: str, ng_views_data: list = None, q
     
     # Update header
     workspace_header.object = f"### Query Results ({len(workspace_results_list)})\n_Click card headers to collapse/expand._"
+
+
+def _add_plot_to_workspace(plot_pane, plot_type: str = "plot", plot_summary: str = None):
+    """Add a plot to the workspace.
+    
+    Args:
+        plot_pane: The Panel pane containing the plot
+        plot_type: Type of plot (scatter, line, bar, heatmap)
+        plot_summary: Optional description like 'log_volume vs elongation'
+    """
+    global workspace_results_list
+    
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    
+    # Generate summary if not provided
+    if not plot_summary:
+        plot_summary = f"{plot_type} plot"
+    
+    # Create collapsible card
+    result_card = pn.Card(
+        plot_pane,
+        title=f"📈 {plot_type.title()} Plot @ {timestamp} - {plot_summary}",
+        collapsed=False,
+        sizing_mode="stretch_width",
+        margin=(0, 0, 10, 0),
+        header_background="#2b3e50",
+    )
+    
+    # Add to container
+    workspace_results_container.append(result_card)
+    workspace_results_list.append(result_card)
+    
+    # Expand workspace card
+    workspace_card.collapsed = False
+    
+    # Limit to last 10 results
+    if len(workspace_results_list) > 10:
+        oldest = workspace_results_list.pop(0)
+        workspace_results_container.remove(oldest)
+    
+    # Update header
+    workspace_header.object = f"### Query Results ({len(workspace_results_list)})\n_Click card headers to collapse/expand._"
+
+
 workspace_header = pn.pane.Markdown("### Query Results\n_Full tables and visualizations appear here._", margin=(0, 0, 10, 0))
 workspace_results_container = pn.Column(sizing_mode="stretch_width")
 

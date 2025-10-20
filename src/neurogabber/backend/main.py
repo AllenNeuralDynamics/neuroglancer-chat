@@ -46,6 +46,11 @@ if DEBUG_ENABLED:
 else:
     logger.info("Debug mode disabled. Set NEUROGABBER_DEBUG=1 to enable verbose logging.")
 
+# Configuration: Control what tool results the LLM sees
+# Set to False to hide query data from LLM (sends minimal acknowledgment instead)
+# Set to True to send full data results to LLM (original behavior)
+SEND_DATA_TO_LLM = False
+
 # In-memory working state per session (MVP). Replace with DB keyed by user/session.
 CURRENT_STATE = NeuroglancerState()
 DATA_MEMORY = DataMemory()
@@ -352,8 +357,32 @@ async def agent_chat_stream(req: ChatRequest = Body(...)):
                         if is_mutating_tool(tool_name):
                             overall_mutated = True
                         
+                        # Apply data hiding for data_query_polars if SEND_DATA_TO_LLM is False
+                        llm_result = result
+                        if tool_name == "data_query_polars" and not SEND_DATA_TO_LLM:
+                            if isinstance(result, dict) and result.get("ok"):
+                                llm_result = {
+                                    "ok": True,
+                                    "rows": result.get("rows"),
+                                    "columns": result.get("columns"),
+                                    "expression": result.get("expression"),
+                                    "message": "✅ Query executed successfully. Data is being rendered in an interactive table widget. Do NOT format, display, or summarize the data - it's already handled by the frontend."
+                                }
+                        
+                        # Apply data hiding for data_plot if SEND_DATA_TO_LLM is False
+                        if tool_name == "data_plot" and not SEND_DATA_TO_LLM:
+                            if isinstance(result, dict) and result.get("ok"):
+                                llm_result = {
+                                    "ok": True,
+                                    "plot_id": result.get("plot_id"),
+                                    "plot_type": result.get("plot_type"),
+                                    "row_count": result.get("row_count"),
+                                    "source_id": result.get("source_id"),
+                                    "message": "✅ Plot generated successfully. The interactive plot is being rendered in the workspace. Do NOT describe or summarize the plot - it's already displayed."
+                                }
+                        
                         # Convert result to string safely for streaming
-                        result_str = str(result) if result is not None else ""
+                        result_str = str(llm_result) if llm_result is not None else ""
                         # Limit very large results to prevent memory issues
                         if len(result_str) > 5000:
                             result_str = result_str[:5000] + "... (truncated)"
@@ -363,7 +392,7 @@ async def agent_chat_stream(req: ChatRequest = Body(...)):
                             "role": "tool",
                             "tool_call_id": tc.get("id"),
                             "name": tool_name,
-                            "content": json.dumps(result)
+                            "content": json.dumps(llm_result)
                         })
                     except Exception as e:
                         error_msg = f"Tool {tool_name} error: {e}"
@@ -439,6 +468,7 @@ def chat(req: ChatRequest):
     aggregated_views_table = None
     aggregated_ng_views = None  # Track ng_views from data_query_polars
     aggregated_query_data = None  # Track full data result from data_query_polars for frontend rendering
+    aggregated_plot_data = None  # Track plot result from data_plot for frontend rendering
 
     timing.start_agent_loop()
     
@@ -519,8 +549,50 @@ def chat(req: ChatRequest):
                     }
                     aggregated_ng_views = result_payload.get("ng_views")
                     _dbg(f"✅ Captured query data: {result_payload['rows']} rows, {len(result_payload['columns'])} columns for frontend rendering")
+                    
+                    # Optionally hide data from LLM to prevent it from summarizing
+                    if not SEND_DATA_TO_LLM:
+                        # Replace result_payload with minimal acknowledgment for LLM
+                        result_payload = {
+                            "ok": True,
+                            "rows": result_payload["rows"],
+                            "columns": result_payload["columns"],
+                            "expression": result_payload.get("expression"),
+                            "message": "✅ Query executed successfully. Data is being rendered in an interactive table widget. Do NOT format, display, or summarize the data - it's already handled by the frontend."
+                        }
+                        _dbg(f"📦 Sending minimal acknowledgment to LLM (SEND_DATA_TO_LLM=False)")
                 else:
                     _dbg(f"❌ data_query_polars result not captured - ok={result_payload.get('ok')}, keys={list(result_payload.keys())}")
+            
+            # Capture plot result from data_plot for frontend rendering
+            if fn == "data_plot":
+                _dbg(f"data_plot result: ok={result_payload.get('ok')}, type={type(result_payload)}")
+                if isinstance(result_payload, dict) and "ok" in result_payload and result_payload["ok"]:
+                    # Store the complete plot result for frontend
+                    aggregated_plot_data = {
+                        "plot_kwargs": result_payload["plot_kwargs"],
+                        "plot_id": result_payload.get("plot_id"),
+                        "plot_type": result_payload.get("plot_type"),
+                        "is_interactive": result_payload.get("is_interactive"),
+                        "row_count": result_payload.get("row_count"),
+                        "expression": result_payload.get("expression"),
+                        "source_id": result_payload.get("source_id"),
+                        "ng_links_placeholder": result_payload.get("ng_links_placeholder"),
+                    }
+                    _dbg(f"✅ Captured plot data: type={result_payload['plot_type']}, interactive={result_payload['is_interactive']}")
+                    
+                    # Hide plot HTML from LLM (similar to query data)
+                    if not SEND_DATA_TO_LLM:
+                        result_payload = {
+                            "ok": True,
+                            "plot_id": result_payload.get("plot_id"),
+                            "plot_type": result_payload.get("plot_type"),
+                            "row_count": result_payload.get("row_count"),
+                            "message": "✅ Plot generated successfully. The interactive plot is being rendered in the workspace. Do NOT describe or summarize the plot - it's already displayed."
+                        }
+                        _dbg(f"📦 Sending minimal acknowledgment to LLM (SEND_DATA_TO_LLM=False)")
+                else:
+                    _dbg(f"❌ data_plot result not captured - ok={result_payload.get('ok')}, keys={list(result_payload.keys())}")
             
             if fn == "data_ng_views_table" and isinstance(result_payload, dict):
                 if "error" in result_payload and "rows" not in result_payload:
@@ -654,6 +726,7 @@ def chat(req: ChatRequest):
         "views_table": aggregated_views_table,
         "ng_views": aggregated_ng_views,  # Expose ng_views for frontend rendering
         "query_data": aggregated_query_data,  # Expose full query result for frontend Tabulator rendering
+        "plot_data": aggregated_plot_data,  # Expose plot result for frontend rendering
     }
     
     timing.mark("response_sent")
@@ -661,6 +734,7 @@ def chat(req: ChatRequest):
     
     _dbg(f"Returning payload mutated={overall_mutated} state_link?={bool(state_link_block)} views_table_rows={len((aggregated_views_table or {}).get('rows', [])) if aggregated_views_table else 0}")
     _dbg(f"query_data present: {aggregated_query_data is not None}, rows: {aggregated_query_data.get('rows') if aggregated_query_data else 'N/A'}")
+    _dbg(f"plot_data present: {aggregated_plot_data is not None}, type: {aggregated_plot_data.get('plot_type') if aggregated_plot_data else 'N/A'}")
     return final_payload
 
 
@@ -751,6 +825,11 @@ def _execute_tool_by_name(name: str, args: dict):
         if name == "data_query_polars":
             _dbg(f"Dispatching data_query_polars with args: {args}")
             return execute_query_polars(**args)  # Call core function directly, no Body objects!
+        if name == "data_plot":
+            _dbg(f"Dispatching data_plot with args: {args}")
+            return execute_plot(**args)
+        if name == "data_list_plots":
+            return t_data_list_plots()
     except Exception as e:  # pragma: no cover
         logger.exception("Tool execution error")
         return {"error": str(e)}
@@ -1320,3 +1399,214 @@ def t_data_ng_views_table(
     except Exception as e:
         import traceback
         return {"error": str(e), "trace": traceback.format_exc()}
+
+
+# ==============================================================================
+# Plotting Tools
+# ==============================================================================
+
+def execute_plot(
+    file_id: str | None = None,
+    summary_id: str | None = None,
+    plot_type: str = "scatter",
+    x: str = None,
+    y: str = None,
+    by: str | None = None,
+    size: str | None = None,
+    color: str | None = None,
+    stacked: bool = False,
+    title: str | None = None,
+    expression: str | None = None,
+    save_plot: bool = True,
+    width: int = 700,
+    height: int = 400,
+    interactive_override: bool | None = None
+) -> dict:
+    """Core logic for generating plot specifications from dataframes.
+    
+    Returns plot parameters and data reference so frontend can render natively in Panel.
+    
+    Args:
+        file_id: Source file ID (mutually exclusive with summary_id)
+        summary_id: Source summary table ID (mutually exclusive with file_id)
+        plot_type: 'scatter', 'line', 'bar', or 'heatmap'
+        x: X-axis column name
+        y: Y-axis column name
+        by: Grouping column
+        size: Point size column (scatter only)
+        color: Point color column (scatter only)
+        stacked: Stack bars (bar only)
+        title: Plot title
+        expression: Optional Polars expression to transform data first
+        save_plot: Store plot in DataMemory
+        width: Plot width in pixels
+        height: Plot height in pixels
+        interactive_override: Force interactive on/off (None = auto)
+        
+    Returns:
+        Dict with plot_kwargs, source_id, and metadata or error
+    """
+    from .tools.plotting import validate_plot_requirements, build_plot_spec
+    
+    _dbg(f"execute_plot: file_id={file_id}, summary_id={summary_id}, plot_type={plot_type}, x={x}, y={y}")
+    
+    # Validate inputs
+    if not x or not y:
+        return {"error": "Both 'x' and 'y' parameters are required"}
+    
+    if file_id and summary_id:
+        return {"error": "Provide either file_id OR summary_id, not both"}
+    
+    # Auto-select most recent file if neither provided
+    if not file_id and not summary_id:
+        files = DATA_MEMORY.list_files()
+        if files:
+            file_id = files[-1]["file_id"]
+            _dbg(f"Auto-selected most recent file: {file_id}")
+        else:
+            return {"error": "No file_id or summary_id provided and no files uploaded"}
+    
+    # Get source dataframe
+    try:
+        if file_id:
+            df = DATA_MEMORY.get_df(file_id)
+            source_id = file_id
+        else:
+            df = DATA_MEMORY.get_summary_df(summary_id)
+            source_id = summary_id
+    except Exception as e:
+        return {"error": f"Failed to load dataframe: {e}"}
+    
+    # Apply expression if provided
+    if expression:
+        _dbg(f"Applying expression before plotting: {expression[:100]}")
+        try:
+            namespace = {'pl': pl, 'df': df, '__builtins__': {}}
+            result = eval(expression, namespace, {})
+            
+            if isinstance(result, pl.DataFrame):
+                df = result
+            elif isinstance(result, pl.Series):
+                df = pl.DataFrame({result.name or "value": result})
+            else:
+                return {"error": f"Expression must return a DataFrame or Series, got {type(result).__name__}"}
+        except Exception as e:
+            return {"error": f"Expression execution failed: {e}"}
+    
+    # Ensure spatial columns are included if they exist and aren't already
+    spatial_info = _detect_spatial_columns(df)
+    if spatial_info:
+        spatial_cols, pattern = spatial_info
+        # Check if all spatial columns are present
+        missing_spatial = [c for c in spatial_cols if c not in df.columns]
+        if missing_spatial:
+            _dbg(f"Spatial columns detected in source but missing after expression: {missing_spatial}")
+    
+    # Validate plot requirements
+    params = {'x': x, 'y': y, 'by': by, 'size': size, 'color': color}
+    validation = validate_plot_requirements(df, plot_type, params)
+    
+    if not validation['valid']:
+        return {
+            "error": "Plot validation failed",
+            "issues": validation['issues'],
+            "suggestions": validation['suggestions']
+        }
+    
+    # Build plot specification
+    plot_result = build_plot_spec(
+        df=df,
+        plot_type=plot_type,
+        x=x,
+        y=y,
+        by=by,
+        size=size,
+        color=color,
+        stacked=stacked,
+        title=title,
+        width=width,
+        height=height,
+        interactive_override=interactive_override
+    )
+    
+    if 'error' in plot_result:
+        return plot_result
+    
+    # Store plot spec if requested
+    plot_id = None
+    if save_plot:
+        plot_spec = plot_result['plot_kwargs'].copy()
+        plot_spec['plot_type'] = plot_type
+        plot_meta = DATA_MEMORY.add_plot(
+            source_id=source_id,
+            plot_type=plot_type,
+            plot_html="",  # No HTML, frontend will render
+            plot_spec=plot_spec,
+            expression=expression
+        )
+        plot_id = plot_meta['plot_id']
+    
+    return {
+        "ok": True,
+        "plot_id": plot_id,
+        "plot_kwargs": plot_result['plot_kwargs'],
+        "plot_type": plot_result['plot_type'],
+        "is_interactive": plot_result['is_interactive'],
+        "row_count": plot_result['row_count'],
+        "ng_links_placeholder": plot_result.get('ng_links_placeholder'),
+        "expression": expression,
+        "source_id": source_id,  # Frontend needs this to fetch data
+        "warnings": validation.get('suggestions', [])
+    }
+
+
+@app.post("/tools/data_plot")
+def t_data_plot(
+    file_id: str | None = Body(None, embed=True),
+    summary_id: str | None = Body(None, embed=True),
+    plot_type: str = Body("scatter", embed=True),
+    x: str = Body(..., embed=True),
+    y: str = Body(..., embed=True),
+    by: str | None = Body(None, embed=True),
+    size: str | None = Body(None, embed=True),
+    color: str | None = Body(None, embed=True),
+    stacked: bool = Body(False, embed=True),
+    title: str | None = Body(None, embed=True),
+    expression: str | None = Body(None, embed=True),
+    save_plot: bool = Body(True, embed=True),
+    width: int = Body(700, embed=True),
+    height: int = Body(400, embed=True),
+    interactive_override: bool | None = Body(None, embed=True)
+):
+    """HTTP endpoint wrapper for data_plot.
+    
+    Generates interactive plot from dataframe data.
+    """
+    return execute_plot(
+        file_id=file_id,
+        summary_id=summary_id,
+        plot_type=plot_type,
+        x=x,
+        y=y,
+        by=by,
+        size=size,
+        color=color,
+        stacked=stacked,
+        title=title,
+        expression=expression,
+        save_plot=save_plot,
+        width=width,
+        height=height,
+        interactive_override=interactive_override
+    )
+
+
+@app.post("/tools/data_list_plots")
+def t_data_list_plots():
+    """List all generated plots (metadata only)."""
+    return {"plots": DATA_MEMORY.list_plots()}
+
+
+# ==============================================================================
+# End Plotting Tools
+# ==============================================================================
