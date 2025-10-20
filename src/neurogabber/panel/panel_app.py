@@ -832,7 +832,9 @@ async def respond(contents: str, user: str, **kwargs):
                         # Return all components in a column
                         yield pn.Column(
                             *components,
-                            sizing_mode="stretch_width"
+                            sizing_mode="stretch_width",
+                            min_height=200,  # Ensure minimum height to prevent overlay
+                            margin=(0, 0, 20, 0)  # Add bottom margin for spacing
                         )
                     # Check if we have plot_data for direct plot rendering
                     elif plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
@@ -880,8 +882,8 @@ async def respond(contents: str, user: str, **kwargs):
                                         # Wrap in Panel's HoloViews pane for native rendering
                                         plot_pane = pn.pane.HoloViews(
                                             object=plot,
-                                            sizing_mode="stretch_both",
-                                            min_height=400
+                                            sizing_mode="stretch_width",
+                                            height=400  # Fixed height to ensure proper spacing in chat
                                         )
                                         
                                         # Build components
@@ -942,7 +944,8 @@ async def respond(contents: str, user: str, **kwargs):
                                         # Return all components
                                         yield pn.Column(
                                             *components,
-                                            sizing_mode="stretch_width"
+                                            sizing_mode="stretch_width",
+                                            margin=(0, 0, 30, 0)  # Larger bottom margin for clear spacing
                                         )
                                     else:
                                         yield f"Error: Could not fetch data for plotting: {preview_data.get('error', 'Unknown error')}"
@@ -980,7 +983,9 @@ async def respond(contents: str, user: str, **kwargs):
                         yield pn.Column(
                             tabulator_widget,
                             workspace_button,
-                            sizing_mode="stretch_width"
+                            sizing_mode="stretch_width",
+                            min_height=200,  # Ensure minimum height to prevent overlay
+                            margin=(0, 0, 20, 0)  # Add bottom margin for spacing
                         )
                     else:
                         yield safe_answer if safe_answer else "(no response)"
@@ -1232,9 +1237,38 @@ def _add_result_to_workspace_from_data(query_data: dict, query_summary: str = No
     # Create Tabulator widget directly from data
     tabulator_widget = _create_tabulator_from_query_data(query_data)
     
+    # Intelligently size based on column count
+    cols = len(query_data.get("columns", []))
+    rows = query_data.get("rows", 0)
+    
+    # For small tables (few columns), use compact width; for large tables, stretch
+    if cols <= 3:
+        # Compact table - don't stretch full width
+        table_container = pn.Column(
+            tabulator_widget,
+            sizing_mode="fixed",
+            width=min(400, cols * 150),  # Scale with columns, max 400px
+            margin=(0, 0, 0, 0)
+        )
+    elif cols <= 6:
+        # Medium table
+        table_container = pn.Column(
+            tabulator_widget,
+            sizing_mode="fixed",
+            width=600,
+            margin=(0, 0, 0, 0)
+        )
+    else:
+        # Large table - use full width
+        table_container = pn.Column(
+            tabulator_widget,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0)
+        )
+    
     # Create collapsible card
     result_card = pn.Card(
-        tabulator_widget,
+        table_container,
         title=f"📊 Query @ {timestamp} - {query_summary}",
         collapsed=False,
         sizing_mode="stretch_width",
@@ -1329,9 +1363,19 @@ def _add_plot_to_workspace(plot_pane, plot_type: str = "plot", plot_summary: str
     if not plot_summary:
         plot_summary = f"{plot_type} plot"
     
+    # Create a square-ish plot container (not stretched)
+    # Clone the plot pane with fixed square sizing
+    plot_container = pn.Column(
+        plot_pane,
+        sizing_mode="fixed",
+        width=500,   # Fixed width for square appearance
+        height=500,  # Fixed height to match
+        margin=(0, 0, 0, 0)
+    )
+    
     # Create collapsible card
     result_card = pn.Card(
-        plot_pane,
+        plot_container,
         title=f"📈 {plot_type.title()} Plot @ {timestamp} - {plot_summary}",
         collapsed=False,
         sizing_mode="stretch_width",
