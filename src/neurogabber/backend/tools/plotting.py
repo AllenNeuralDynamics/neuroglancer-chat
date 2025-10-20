@@ -149,11 +149,12 @@ def build_plot_spec(
         if color:
             plot_kwargs['c'] = color
     elif plot_type == 'bar':
+        # For bar plots, ensure ungrouped/side-by-side bars by default
         plot_kwargs['stacked'] = stacked
-        # Explicitly set default aggregation to None to prevent automatic stacking
-        if 'by' in plot_kwargs and 'by' in plot_kwargs:
-            # When grouping is used, ensure we don't auto-stack unless explicitly requested
-            pass
+        # Additional parameters to prevent unwanted stacking behavior
+        if not stacked:
+            # When not stacking, ensure bars appear side-by-side
+            plot_kwargs['alpha'] = 0.8  # Slight transparency for overlapping bars
     elif plot_type == 'heatmap':
         # Remove x/y for heatmap
         plot_kwargs.pop('x', None)

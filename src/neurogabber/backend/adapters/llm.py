@@ -66,6 +66,9 @@ Plotting rules - ACTION REQUIRED:
   → Call data_plot with: expression='df.sample(20)', plot_type='scatter', x='log_volume', y='elongation'
 - Example 2: "plot mean log_volume for cluster labels with elongation > 0.5"
   → Call data_plot with: expression='df.filter(pl.col("elongation") > 0.5).group_by("cluster_id").agg(pl.mean("log_volume"))', plot_type='bar', x='cluster_id', y='log_volume'
+  ⚠️ NOTE: Do NOT use 'by' parameter when data is already aggregated by x-axis column
+- The 'by' parameter is for creating multiple series (e.g., scatter plot colored by category), NOT for bar plot grouping
+- For bar plots showing aggregated values: aggregate in expression, set x to category column, y to metric column, NO 'by' parameter
 - For scatter plots from raw data without transformation, omit expression.
 - Common plot types: scatter (x/y points), line (trends), bar (categorical comparisons), heatmap (matrix).
 - ⚠️ CRITICAL: After data_plot returns, DO NOT describe the plot or summarize data. The frontend renders it automatically.
@@ -335,7 +338,7 @@ DATA_TOOLS = [
           },
           "x": {"type": "string", "description": "X-axis column name (required)"},
           "y": {"type": "string", "description": "Y-axis column name (required)"},
-          "by": {"type": "string", "description": "Grouping column - creates multiple series/colors"},
+          "by": {"type": "string", "description": "Grouping column - creates multiple colored series in scatter/line plots. For bar plots, do NOT use 'by' when data is already aggregated - just set x to the category column and y to the metric."},
           "size": {"type": "string", "description": "Column for point size (scatter only)"},
           "color": {"type": "string", "description": "Column for point color (scatter only)"},
           "stacked": {"type": "boolean", "default": False, "description": "Stack bars side-by-side (bar plot only, default is grouped/side-by-side bars)"},
