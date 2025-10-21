@@ -577,6 +577,7 @@ def chat(req: ChatRequest):
                         "row_count": result_payload.get("row_count"),
                         "expression": result_payload.get("expression"),
                         "source_id": result_payload.get("source_id"),
+                        "data": result_payload.get("data"),  # Include transformed data for frontend
                         "ng_links_placeholder": result_payload.get("ng_links_placeholder"),
                     }
                     _dbg(f"✅ Captured plot data: type={result_payload['plot_type']}, interactive={result_payload['is_interactive']}")
@@ -1546,6 +1547,9 @@ def execute_plot(
         )
         plot_id = plot_meta['plot_id']
     
+    # Convert transformed dataframe to dict format for frontend
+    plot_data_rows = df.to_dicts()
+    
     return {
         "ok": True,
         "plot_id": plot_id,
@@ -1555,7 +1559,8 @@ def execute_plot(
         "row_count": plot_result['row_count'],
         "ng_links_placeholder": plot_result.get('ng_links_placeholder'),
         "expression": expression,
-        "source_id": source_id,  # Frontend needs this to fetch data
+        "source_id": source_id,
+        "data": plot_data_rows,  # Send the transformed data directly
         "warnings": validation.get('suggestions', [])
     }
 

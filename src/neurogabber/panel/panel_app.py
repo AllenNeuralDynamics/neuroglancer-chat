@@ -848,109 +848,112 @@ async def respond(contents: str, user: str, **kwargs):
                             plot_type = plot_data.get("plot_type", "scatter")
                             expression = plot_data.get("expression", "")
                             
-                            # Fetch data from backend
-                            async with httpx.AsyncClient(timeout=30) as client:
-                                # Determine if source is file or summary
-                                if source_id:
-                                    # Try to get the dataframe data via preview endpoint
-                                    preview_resp = await client.post(
-                                        f"{BACKEND}/tools/data_preview",
-                                        json={"file_id": source_id, "n": 10000}  # Get up to 10k rows for plotting
-                                    )
-                                    preview_data = preview_resp.json()
-                                    
-                                    if "rows" in preview_data:
-                                        # Convert to polars dataframe for hvplot
-                                        import polars as pl
-                                        df = pl.DataFrame(preview_data["rows"])
-                                        
-                                        # Import hvplot.polars to enable .hvplot accessor
-                                        import hvplot.polars
-                                        
-                                        # Create the plot using hvplot
-                                        if plot_type == "scatter":
-                                            plot = df.hvplot.scatter(**plot_kwargs)
-                                        elif plot_type == "line":
-                                            plot = df.hvplot.line(**plot_kwargs)
-                                        elif plot_type == "bar":
-                                            plot = df.hvplot.bar(**plot_kwargs)
-                                        elif plot_type == "heatmap":
-                                            plot = df.hvplot.heatmap(**plot_kwargs)
-                                        else:
-                                            plot = df.hvplot(**plot_kwargs)
-                                        
-                                        # Wrap in Panel's HoloViews pane for native rendering
-                                        plot_pane = pn.pane.HoloViews(
-                                            object=plot,
-                                            sizing_mode="stretch_width",
-                                            height=400  # Fixed height to ensure proper spacing in chat
-                                        )
-                                        
-                                        # Build components
-                                        components = []
-                                        
-                                        # Add LLM context if present
-                                        if safe_answer and safe_answer.strip():
-                                            llm_text = safe_answer.strip()
-                                            import re
-                                            llm_text = re.sub(r'```[a-z]*\n.*?\n```', '', llm_text, flags=re.DOTALL)
-                                            llm_text = llm_text.strip()
-                                            if llm_text:
-                                                components.append(pn.pane.Markdown(llm_text, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
-                                        
-                                        # Add expression if present
-                                        if expression:
-                                            expression_display = pn.pane.Markdown(
-                                                f"**Data transformation:**\n```python\n{expression}\n```",
-                                                sizing_mode="stretch_width",
-                                                margin=(5, 5, 10, 5)
-                                            )
-                                            components.append(expression_display)
-                                        
-                                        # Add plot info
-                                        plot_info = f"**{plot_type.capitalize()}** plot • "
-                                        plot_info += f"{'Interactive' if plot_data.get('is_interactive') else 'Static'} • "
-                                        plot_info += f"{plot_data.get('row_count', 0)} points"
-                                        components.append(pn.pane.Markdown(plot_info, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
-                                        
-                                        # Add the plot
-                                        components.append(plot_pane)
-                                        
-                                        # Add workspace button
-                                        workspace_button = pn.widgets.Button(
-                                            name="📊 Add Plot to Workspace",
-                                            button_type="primary",
-                                            sizing_mode="fixed",
-                                            width=180,
-                                            margin=(5, 0)
-                                        )
-                                        
-                                        # Capture plot info in closure
-                                        captured_plot_pane = plot_pane
-                                        captured_plot_type = plot_type
-                                        captured_x = plot_kwargs.get('x', '')
-                                        captured_y = plot_kwargs.get('y', '')
-                                        plot_summary = f"{captured_x} vs {captured_y}" if captured_x and captured_y else None
-                                        
-                                        def add_plot_to_workspace(event):
-                                            _add_plot_to_workspace(captured_plot_pane, captured_plot_type, plot_summary)
-                                            workspace_button.name = "✓ Added to Workspace"
-                                            workspace_button.button_type = "success"
-                                            workspace_button.disabled = True
-                                        
-                                        workspace_button.on_click(add_plot_to_workspace)
-                                        components.append(workspace_button)
-                                        
-                                        # Return all components
-                                        yield pn.Column(
-                                            *components,
-                                            sizing_mode="stretch_width",
-                                            margin=(0, 0, 30, 0)  # Larger bottom margin for clear spacing
-                                        )
-                                    else:
-                                        yield f"Error: Could not fetch data for plotting: {preview_data.get('error', 'Unknown error')}"
+                            # Use the transformed data directly from plot_data (not fetching from source)
+                            plot_data_rows = plot_data.get("data")
+                            
+                            if plot_data_rows:
+                                # Convert to polars dataframe for hvplot
+                                import polars as pl
+                                df = pl.DataFrame(plot_data_rows)
+                                
+                                # For bar plots, ensure x-axis column is treated as categorical
+                                # This prevents numeric cluster IDs from being treated as continuous
+                                if plot_type == "bar" and 'x' in plot_kwargs:
+                                    x_col = plot_kwargs['x']
+                                    if x_col in df.columns:
+                                        # Cast to string to ensure categorical treatment
+                                        df = df.with_columns(pl.col(x_col).cast(pl.Utf8))
+                                
+                                # Import hvplot.polars to enable .hvplot accessor
+                                import hvplot.polars
+                                
+                                # Create the plot using hvplot
+                                if plot_type == "scatter":
+                                    plot = df.hvplot.scatter(**plot_kwargs)
+                                elif plot_type == "line":
+                                    plot = df.hvplot.line(**plot_kwargs)
+                                elif plot_type == "bar":
+                                    # For bar plots, ensure y is treated as single column (not multi-column stack)
+                                    # by using kind='bar' with explicit column specification
+                                    bar_kwargs = plot_kwargs.copy()
+                                    # Don't pass 'by' for simple bar charts (causes grouping issues)
+                                    bar_kwargs.pop('by', None)
+                                    plot = df.hvplot.bar(**bar_kwargs)
+                                elif plot_type == "heatmap":
+                                    plot = df.hvplot.heatmap(**plot_kwargs)
                                 else:
-                                    yield "Error: No source_id provided for plot data"
+                                    plot = df.hvplot(**plot_kwargs)
+                                
+                                # Wrap in Panel's HoloViews pane for native rendering
+                                plot_pane = pn.pane.HoloViews(
+                                    object=plot,
+                                    sizing_mode="stretch_width",
+                                    height=400  # Fixed height to ensure proper spacing in chat
+                                )
+                                
+                                # Build components
+                                components = []
+                                
+                                # Add LLM context if present
+                                if safe_answer and safe_answer.strip():
+                                    llm_text = safe_answer.strip()
+                                    import re
+                                    llm_text = re.sub(r'```[a-z]*\n.*?\n```', '', llm_text, flags=re.DOTALL)
+                                    llm_text = llm_text.strip()
+                                    if llm_text:
+                                        components.append(pn.pane.Markdown(llm_text, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
+                                
+                                # Add expression if present
+                                if expression:
+                                    expression_display = pn.pane.Markdown(
+                                        f"**Data transformation:**\n```python\n{expression}\n```",
+                                        sizing_mode="stretch_width",
+                                        margin=(5, 5, 10, 5)
+                                    )
+                                    components.append(expression_display)
+                                
+                                # Add plot info
+                                plot_info = f"**{plot_type.capitalize()}** plot • "
+                                plot_info += f"{'Interactive' if plot_data.get('is_interactive') else 'Static'} • "
+                                plot_info += f"{plot_data.get('row_count', 0)} points"
+                                components.append(pn.pane.Markdown(plot_info, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
+                                
+                                # Add the plot
+                                components.append(plot_pane)
+                                
+                                # Add workspace button
+                                workspace_button = pn.widgets.Button(
+                                    name="📊 Add Plot to Workspace",
+                                    button_type="primary",
+                                    sizing_mode="fixed",
+                                    width=180,
+                                    margin=(5, 0)
+                                )
+                                
+                                # Capture plot info in closure
+                                captured_plot_pane = plot_pane
+                                captured_plot_type = plot_type
+                                captured_x = plot_kwargs.get('x', '')
+                                captured_y = plot_kwargs.get('y', '')
+                                plot_summary = f"{captured_x} vs {captured_y}" if captured_x and captured_y else None
+                                
+                                def add_plot_to_workspace(event):
+                                    _add_plot_to_workspace(captured_plot_pane, captured_plot_type, plot_summary)
+                                    workspace_button.name = "✓ Added to Workspace"
+                                    workspace_button.button_type = "success"
+                                    workspace_button.disabled = True
+                                
+                                workspace_button.on_click(add_plot_to_workspace)
+                                components.append(workspace_button)
+                                
+                                # Return all components
+                                yield pn.Column(
+                                    *components,
+                                    sizing_mode="stretch_width",
+                                    margin=(0, 0, 30, 0)  # Larger bottom margin for clear spacing
+                                )
+                            else:
+                                yield "Error: No plot data received from backend"
                         except Exception as e:
                             logger.exception("Failed to render plot")
                             yield f"Error rendering plot: {str(e)}"
@@ -1417,12 +1420,12 @@ workspace_card = pn.Card(
     styles={"maxHeight": "400px", "overflow": "auto"},
 )
 app = pn.template.FastListTemplate(
-    title=f"Neurogabber v {version}",
+    title=f"Neuroglancer Chat v{version}",
     sidebar=[upload_card,chat], #views_table (dont need below)
     right_sidebar=settings_card,
     collapsed_right_sidebar = True,
     main=[workspace_card, viewer],
-    sidebar_width=450,
+    sidebar_width=500,
     theme="dark",
 )
 
