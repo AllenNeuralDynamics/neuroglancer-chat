@@ -149,7 +149,10 @@ def to_url(state) -> str:
     if not isinstance(state, dict):  # pragma: no cover (defensive)
         raise TypeError("to_url() expects a dict or serializable state string")
 
-    state_str = json.dumps(state, separators=(",", ":"), sort_keys=True)
+    # CRITICAL: Do NOT use sort_keys=True here as it will reorder the dimensions
+    # (e.g., x,y,z,t -> t,x,y,z) which breaks the position array mapping!
+    # Python 3.7+ preserves dict insertion order, so we maintain the original dimension order.
+    state_str = json.dumps(state, separators=(",", ":"))
     encoded = quote(state_str, safe="")
     # Neuroglancer canonical form uses '#!' before the JSON; include it.
     return f"{NEURO_BASE}#!{encoded}"
