@@ -967,7 +967,7 @@ async def respond(contents: str, user: str, **kwargs):
                             name="📊 Add to Workspace",
                             button_type="primary",
                             sizing_mode="fixed",
-                            width=150,
+                            width=200,
                             margin=(5, 0)
                         )
                         
@@ -1062,6 +1062,8 @@ if pd is not None:
         height=0,  # start collapsed until data present
         disabled=True,
         show_index=False,
+        sizing_mode="stretch_width",
+        layout="fit_columns",  # Stretch columns to fill available width
         buttons={
             'preview': "<i class='fa fa-eye' title='Preview file'></i>",
         },
@@ -1076,11 +1078,14 @@ else:
     uploaded_table = pn.pane.Markdown("pandas not available")
     summaries_table = pn.pane.Markdown("pandas not available")
 
-# Helper to update upload card title with dynamic file count
+# Helper to update upload tab title with dynamic file count
 def _update_upload_card_title(n: int):
     try:
         label = "file" if n == 1 else "files"
-        upload_card.title = f"Data Upload (📁 {n} {label})"
+        # Update the tab title (will be set after workspace_tabs is created)
+        # This is called during refresh, tabs will exist by then
+        if 'workspace_tabs' in globals():
+            workspace_tabs[1] = (f"Data Upload (📁 {n} {label})", data_upload_content)
     except Exception:
         # Fallback silently; title update is non-critical
         pass
@@ -1198,20 +1203,6 @@ def _initial_refresh():
     _refresh_files()
     _refresh_summaries()
 
-upload_card = pn.Card(
-    pn.Column(
-        file_drop,
-        upload_notice,
-        #pn.pane.Markdown("**Uploaded Files**"),
-        uploaded_table,
-        #pn.pane.Markdown("**Summaries**"),
-        #summaries_table,
-    ),
-    title="Data Upload",
-    collapsed=False,
-    width=450,
-)
-
 # Initialize title with zero count until first refresh occurs
 _update_upload_card_title(0)
 
@@ -1291,8 +1282,9 @@ def _add_result_to_workspace_from_data(query_data: dict, query_summary: str = No
         oldest = workspace_results_list.pop(0)
         workspace_results_container.remove(oldest)
     
-    # Update header
-    workspace_header.object = f"### Query Results ({len(workspace_results_list)})\n_Click card headers to collapse/expand._"
+    # Update Results tab title with counter
+    if 'workspace_tabs' in globals():
+        workspace_tabs[0] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
 
 
 def _add_result_to_workspace(full_table_text: str, ng_views_data: list = None, query_summary: str = None):
@@ -1345,8 +1337,9 @@ def _add_result_to_workspace(full_table_text: str, ng_views_data: list = None, q
         oldest = workspace_results_list.pop(0)
         workspace_results_container.remove(oldest)
     
-    # Update header
-    workspace_header.object = f"### Query Results ({len(workspace_results_list)})\n_Click card headers to collapse/expand._"
+    # Update Results tab title with counter
+    if 'workspace_tabs' in globals():
+        workspace_tabs[0] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
 
 
 def _add_plot_to_workspace(plot_pane, plot_type: str = "plot", plot_summary: str = None):
@@ -1398,30 +1391,78 @@ def _add_plot_to_workspace(plot_pane, plot_type: str = "plot", plot_summary: str
         oldest = workspace_results_list.pop(0)
         workspace_results_container.remove(oldest)
     
-    # Update header
-    workspace_header.object = f"### Query Results ({len(workspace_results_list)})\n_Click card headers to collapse/expand._"
+    # Update Results tab title with counter
+    if 'workspace_tabs' in globals():
+        workspace_tabs[0] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
 
 
 workspace_header = pn.pane.Markdown("### Query Results\n_Full tables and visualizations appear here._", margin=(0, 0, 10, 0))
 workspace_results_container = pn.Column(sizing_mode="stretch_width")
 
+# Height toggle button for workspace expansion
+workspace_expanded = pn.widgets.Toggle(
+    name="⬍ Expand Workspace ⬍",
+    value=False,
+    button_type="default",
+    sizing_mode="fixed",
+    width=180,
+    margin=(0, 0, 10, 0)
+)
+
+def toggle_workspace_height(event):
+    """Toggle workspace height between compact (400px) and expanded (800px)"""
+    if event.new:
+        workspace_tabs.styles = {"maxHeight": "800px", "overflow": "auto"}
+        workspace_card.styles = {"maxHeight": "800px", "overflow": "auto"}
+        workspace_expanded.name = "⬆ Compact Workspace ⬆"
+        workspace_expanded.button_type = "primary"
+    else:
+        workspace_tabs.styles = {"maxHeight": "400px", "overflow": "auto"}
+        workspace_card.styles = {"maxHeight": "400px", "overflow": "auto"}
+        workspace_expanded.name = "⬍ Expand Workspace ⬍"
+        workspace_expanded.button_type = "default"
+
+workspace_expanded.param.watch(toggle_workspace_height, 'value')
+
 workspace_body = pn.Column(
-    workspace_header,
+    workspace_expanded,
     workspace_results_container,
     sizing_mode="stretch_width",
     scroll=True,
 )
-# Constrain height to 400px with scrolling inside
+
+# Data upload tab content (constrain width to prevent stretching)
+data_upload_content = pn.Column(
+    file_drop,
+    upload_notice,
+    uploaded_table,
+    sizing_mode="stretch_width",
+    max_width=800,  # Allow wider to fill workspace area
+    margin=(10, 10, 10, 10)
+)
+
+# Create tabbed workspace panel
+workspace_tabs = pn.Tabs(
+    ("Results", workspace_body),
+    ("Data Upload", data_upload_content),
+    dynamic=True,
+    sizing_mode="stretch_width",
+    styles={"maxHeight": "400px", "overflow": "auto"},
+)
+
+# Constrain height to 400px with scrolling inside (can be toggled to 800px)
 workspace_card = pn.Card(
-    workspace_body,
+    workspace_tabs,
     title="Workspace",
     collapsed=True,
     sizing_mode="stretch_width",
     styles={"maxHeight": "400px", "overflow": "auto"},
+    margin=(0, 0, 10, 0)
 )
+
 app = pn.template.FastListTemplate(
-    title=f"Neuroglancer Chat v{version}",
-    sidebar=[upload_card,chat], #views_table (dont need below)
+    title=f"Neuroglanger Chat v{version}",
+    sidebar=[chat], #views_table (dont need below)
     right_sidebar=settings_card,
     collapsed_right_sidebar = True,
     main=[workspace_card, viewer],
