@@ -68,12 +68,41 @@ class NeuroglancerState:
             raise ValueError(f"Unsupported layer_type '{layer_type}'. Allowed: {sorted(ALLOWED_LAYER_TYPES)}")
         if any(L.get("name") == name for L in self.data.get("layers", [])):
             return self  # idempotent
-        layer = {
-            "type": layer_type,
-            "name": name,
-            "source": source if source is not None else "precomputed://example",
-            "visible": kwargs.pop("visible", True),
-        }
+        
+        # Special handling for annotation layers to match Neuroglancer's actual schema
+        if layer_type == "annotation":
+            if source is None:
+                source = {"url": "local://annotations"}
+            elif isinstance(source, str):
+                source = {"url": source}
+            
+            # Get color from either annotationColor or annotation_color
+            color = kwargs.pop("annotationColor", kwargs.pop("annotation_color", None))
+            if not color:
+                color = "#cecd11"  # Default yellow
+            
+            # Annotation layers need these fields at layer level (not in source)
+            layer = {
+                "type": layer_type,
+                "source": source,
+                "tool": kwargs.pop("tool", "annotatePoint"),
+                "tab": kwargs.pop("tab", "annotations"),
+                "annotationColor": color,
+                "annotations": [],  # annotations array at layer level
+                "name": name,
+            }
+        else:
+            # For image/segmentation layers, use string source
+            if source is None:
+                source = "precomputed://example"
+            
+            layer = {
+                "type": layer_type,
+                "name": name,
+                "source": source,
+                "visible": kwargs.pop("visible", True),
+            }
+        
         for k, v in kwargs.items():
             layer[k] = v
         self.data.setdefault("layers", []).append(layer)
@@ -87,11 +116,20 @@ class NeuroglancerState:
         return self
 
     def add_annotations(self, layer: str, items: Iterable[Dict]):
+        """Add annotation items to an annotation layer.
+        
+        Follows Neuroglancer's actual schema:
+        - annotations array is at layer level (not in source)
+        - each item must have 'type' field ('point', 'box', 'ellipsoid', etc.)
+        """
         ann = next((L for L in self.data.get("layers", []) if L.get("type") == "annotation" and L.get("name") == layer), None)
         if not ann:
-            ann = {"type": "annotation", "name": layer, "source": {"annotations": []}}
-            self.data.setdefault("layers", []).append(ann)
-        ann["source"].setdefault("annotations", []).extend(items)
+            # Create layer if it doesn't exist
+            self.add_layer(layer, "annotation")
+            ann = next((L for L in self.data.get("layers", []) if L.get("type") == "annotation" and L.get("name") == layer))
+        
+        # Ensure annotations array exists at layer level
+        ann.setdefault("annotations", []).extend(items)
         return self
 
     # --- Serialization helpers -------------------------------------------------

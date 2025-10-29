@@ -43,6 +43,83 @@ class SaveState(BaseModel):
     pass
 
 
+# Neuroglancer state management
+class AddLayer(BaseModel):
+    name: str
+    layer_type: Literal["image", "segmentation", "annotation"] = "image"
+    source: Union[str, dict, None] = None
+    visible: bool = True
+    annotation_color: Optional[str] = None  # Hex color or color name for annotation layers
+
+
+class SetLayerVisibility(BaseModel):
+    name: str
+    visible: bool = True
+
+
+class StateLoad(BaseModel):
+    link: str
+
+
+class StateSummary(BaseModel):
+    detail: Literal["minimal", "standard", "full"] = "standard"
+
+
+# Data tools
+class DataInfo(BaseModel):
+    file_id: str
+    sample_rows: int = 5
+
+
+class DataPreview(BaseModel):
+    file_id: str
+    n: int = 10
+
+
+class DataDescribe(BaseModel):
+    file_id: str
+
+
+class DataQuery(BaseModel):
+    file_id: Optional[str] = None
+    summary_id: Optional[str] = None
+    expression: str
+    save_as: Optional[str] = None
+    limit: int = 100
+
+
+class DataPlot(BaseModel):
+    file_id: Optional[str] = None
+    summary_id: Optional[str] = None
+    plot_type: Literal["scatter", "line", "bar", "heatmap"] = "scatter"
+    x: str
+    y: str
+    by: Optional[str] = None
+    size: Optional[str] = None
+    color: Optional[str] = None
+    stacked: bool = False
+    title: Optional[str] = None
+    expression: Optional[str] = None
+    save_plot: bool = True
+    width: int = 700
+    height: int = 400
+    interactive_override: Optional[bool] = None
+
+
+class NgViewsTable(BaseModel):
+    file_id: Optional[str] = None
+    summary_id: Optional[str] = None
+    sort_by: Optional[str] = None
+    descending: bool = True
+    top_n: int = 5
+    id_column: str = "cell_id"
+    center_columns: List[str] = ["x", "y", "z"]
+    include_columns: Optional[List[str]] = None
+    lut: Optional[dict] = None
+    annotations: bool = False
+    link_label_column: Optional[str] = None
+
+
 # Chat
 class ChatMessage(BaseModel):
     role: Literal["user","assistant","tool"]

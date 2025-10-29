@@ -8,7 +8,11 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(os.path.dir
 
 from fastapi import FastAPI, UploadFile, Body, Query, File
 from fastapi.responses import StreamingResponse
-from .models import ChatRequest, SetView, SetLUT, AddAnnotations, HistogramReq, IngestCSV, SaveState
+from .models import (
+    ChatRequest, SetView, SetLUT, AddAnnotations, HistogramReq, IngestCSV, SaveState,
+    AddLayer, SetLayerVisibility, StateLoad, StateSummary,
+    DataInfo, DataPreview, DataDescribe, DataQuery, DataPlot, NgViewsTable
+)
 from .tools.neuroglancer_state import (
     NeuroglancerState,
     to_url,
@@ -135,29 +139,33 @@ def t_set_lut(args: SetLUT):
     return {"ok": True}
 
 @app.post("/tools/ng_add_layer")
-def t_add_layer(name: str = Body(..., embed=True), layer_type: str = Body("image", embed=True), source: str | dict | None = Body(None, embed=True), visible: bool = Body(True, embed=True)):
+def t_add_layer(args: AddLayer):
     """Add a new layer to the Neuroglancer state if it does not already exist.
 
     The source parameter is passed through verbatim; clients are responsible for supplying a valid Neuroglancer source spec.
+    For annotation layers, annotation_color can specify the color (hex or name).
     """
     global CURRENT_STATE
     try:
-        CURRENT_STATE.add_layer(name=name, layer_type=layer_type, source=source, visible=visible)
-        return {"ok": True, "layer": name, "layer_type": layer_type}
+        kwargs = {"visible": args.visible}
+        if args.annotation_color:
+            kwargs["annotation_color"] = args.annotation_color
+        CURRENT_STATE.add_layer(name=args.name, layer_type=args.layer_type, source=args.source, **kwargs)
+        return {"ok": True, "layer": args.name, "layer_type": args.layer_type}
     except ValueError as ve:
         return {"ok": False, "error": str(ve)}
     except Exception as e:
         return {"ok": False, "error": f"Failed to add layer: {e}"}
 
 @app.post("/tools/ng_set_layer_visibility")
-def t_set_layer_visibility(name: str = Body(..., embed=True), visible: bool = Body(True, embed=True)):
+def t_set_layer_visibility(args: SetLayerVisibility):
     """Set the visibility flag on an existing layer.
 
     Adds a 'visible' key if not already present; silently no-ops if layer not found.
     """
     global CURRENT_STATE
-    CURRENT_STATE.set_layer_visibility(name=name, visible=visible)
-    return {"ok": True, "layer": name, "visible": visible}
+    CURRENT_STATE.set_layer_visibility(name=args.name, visible=args.visible)
+    return {"ok": True, "layer": args.name, "visible": args.visible}
 
 @app.post("/tools/ng_annotations_add")
 def t_add_annotations(args: AddAnnotations):
@@ -165,13 +173,26 @@ def t_add_annotations(args: AddAnnotations):
     items = []
     for a in args.items:
         if a.type == "point":
-            items.append({"point": [a.center.x, a.center.y, a.center.z], "id": a.id or None})
+            # Must include 'type' field as per Neuroglancer schema
+            items.append({
+                "point": [a.center.x, a.center.y, a.center.z],
+                "type": "point",
+                "id": a.id or None
+            })
         elif a.type == "box":
-            items.append({"type":"box", "point": [a.center.x, a.center.y, a.center.z],
-                          "size": [a.size.x, a.size.y, a.size.z], "id": a.id or None})
+            items.append({
+                "type": "box",
+                "point": [a.center.x, a.center.y, a.center.z],
+                "size": [a.size.x, a.size.y, a.size.z],
+                "id": a.id or None
+            })
         elif a.type == "ellipsoid":
-            items.append({"type":"ellipsoid", "center": [a.center.x, a.center.y, a.center.z],
-                          "radii": [a.size.x/2, a.size.y/2, a.size.z/2], "id": a.id or None})
+            items.append({
+                "type": "ellipsoid",
+                "center": [a.center.x, a.center.y, a.center.z],
+                "radii": [a.size.x/2, a.size.y/2, a.size.z/2],
+                "id": a.id or None
+            })
     CURRENT_STATE.add_annotations(args.layer, items)
     return {"ok": True}
 
@@ -207,11 +228,11 @@ def t_save_state(_: SaveState, mask: bool = Query(False, description="Return mas
 
 
 @app.post("/tools/state_load")
-def t_state_load(link: str = Body(..., embed=True)):
+def t_state_load(args: StateLoad):
     """Load state from a Neuroglancer URL or fragment and set CURRENT_STATE."""
     global CURRENT_STATE
     try:
-        CURRENT_STATE = NeuroglancerState.from_url(link)
+        CURRENT_STATE = NeuroglancerState.from_url(args.link)
         return {"ok": True}
     except Exception as e:
         logger.exception("Failed to load state from link")
@@ -219,9 +240,9 @@ def t_state_load(link: str = Body(..., embed=True)):
 
 
 @app.post("/tools/demo_load")
-def t_demo_load(link: str = Body(..., embed=True)):
+def t_demo_load(args: StateLoad):
     """Convenience: same as state_load, named for demos."""
-    return t_state_load(link)
+    return t_state_load(args)
 
 # TODO
 #Optional (alternative path): if you prefer “read-only” to still be tool-based, 
@@ -779,7 +800,7 @@ def _truncate_tool_output(obj, max_chars: int = 4000):
 
 def _execute_tool_by_name(name: str, args: dict):
     """Dispatcher for internal tool execution (server-side)."""
-    # Directly call the endpoint functions; replicate FastAPI parameter handling
+    # Directly call the endpoint functions with Pydantic model instantiation
     try:
         if name == "ng_set_view":
             from .models import SetView
@@ -787,6 +808,12 @@ def _execute_tool_by_name(name: str, args: dict):
         if name == "ng_set_lut":
             from .models import SetLUT
             return t_set_lut(SetLUT(**args))
+        if name == "ng_add_layer":
+            from .models import AddLayer
+            return t_add_layer(AddLayer(**args))
+        if name == "ng_set_layer_visibility":
+            from .models import SetLayerVisibility
+            return t_set_layer_visibility(SetLayerVisibility(**args))
         if name == "ng_annotations_add":
             from .models import AddAnnotations
             return t_add_annotations(AddAnnotations(**args))
@@ -800,35 +827,37 @@ def _execute_tool_by_name(name: str, args: dict):
             from .models import SaveState
             return t_save_state(SaveState())
         if name == "state_load":
-            link = args.get("link")
-            return t_state_load(link)
+            from .models import StateLoad
+            return t_state_load(StateLoad(**args))
         if name == "ng_state_summary":
-            detail = args.get("detail", "standard")
-            return t_state_summary(detail)
+            from .models import StateSummary
+            return t_state_summary(StateSummary(**args))
         if name == "ng_state_link":
             return t_state_link()
         if name == "data_list_files":
             return t_data_list_files()
+        if name == "data_info":
+            from .models import DataInfo
+            return t_data_info(DataInfo(**args))
         if name == "data_preview":
-            return t_data_preview(**args)
+            from .models import DataPreview
+            return t_data_preview(DataPreview(**args))
         if name == "data_describe":
-            return t_data_describe(**args)
+            from .models import DataDescribe
+            return t_data_describe(DataDescribe(**args))
         if name == "data_list_summaries":
             return t_data_list_summaries()
-        if name == "data_info":
-            return t_data_info(**args)
-        if name == "data_ng_views_table":
-            return t_data_ng_views_table(**args)
-        if name == "ng_add_layer":
-            return t_add_layer(**args)
-        if name == "ng_set_layer_visibility":
-            return t_set_layer_visibility(**args)
         if name == "data_query_polars":
+            from .models import DataQuery
             _dbg(f"Dispatching data_query_polars with args: {args}")
-            return execute_query_polars(**args)  # Call core function directly, no Body objects!
+            return t_data_query_polars(DataQuery(**args))
         if name == "data_plot":
+            from .models import DataPlot
             _dbg(f"Dispatching data_plot with args: {args}")
-            return execute_plot(**args)
+            return t_data_plot(DataPlot(**args))
+        if name == "data_ng_views_table":
+            from .models import NgViewsTable
+            return t_data_ng_views_table(NgViewsTable(**args))
         if name == "data_list_plots":
             return t_data_list_plots()
     except Exception as e:  # pragma: no cover
@@ -942,7 +971,8 @@ def summarize_state_struct(state, detail: str = "standard") -> dict:
                 if rng:
                     base["normalized_range"] = rng
             elif ltype == "annotation":
-                anns = (L.get("source") or {}).get("annotations") or []
+                # Annotations are now at layer level, not in source
+                anns = L.get("annotations") or []
                 base["annotation_count"] = len(anns)
         if detail == "full":
             shader = L.get("shader")
@@ -953,7 +983,8 @@ def summarize_state_struct(state, detail: str = "standard") -> dict:
     annotation_layers = []
     for L in sd.get("layers", []):
         if L.get("type") == "annotation":
-            anns = (L.get("source") or {}).get("annotations") or []
+            # Annotations are now at layer level, not in source
+            anns = L.get("annotations") or []
             types = set()
             for a in anns:
                 t = a.get("type") or ("point" if "point" in a else None)
@@ -981,8 +1012,8 @@ def summarize_state_struct(state, detail: str = "standard") -> dict:
 
 
 @app.post("/tools/ng_state_summary")
-def t_state_summary(detail: str = Body("standard", embed=True)):
-    return summarize_state_struct(CURRENT_STATE, detail=detail)
+def t_state_summary(args: StateSummary):
+    return summarize_state_struct(CURRENT_STATE, detail=args.detail)
 
 # ------------------- Data tool endpoints -------------------
 
@@ -1000,14 +1031,14 @@ def t_data_list_files():
     return {"files": DATA_MEMORY.list_files()}
 
 @app.post("/tools/data_info")
-def t_data_info(file_id: str = Body(..., embed=True), sample_rows: int = Body(5, embed=True)):
+def t_data_info(args: DataInfo):
     try:
-        df = DATA_MEMORY.get_df(file_id)
-        sample_rows = max(1, min(sample_rows, 20))
+        df = DATA_MEMORY.get_df(args.file_id)
+        sample_rows = max(1, min(args.sample_rows, 20))
         sample = df.head(sample_rows).to_dicts()
         dtypes = {c: str(dt) for c, dt in zip(df.columns, df.dtypes)}
         return {
-            "file_id": file_id,
+            "file_id": args.file_id,
             "n_rows": df.height,
             "n_cols": df.width,
             "columns": df.columns,
@@ -1018,20 +1049,20 @@ def t_data_info(file_id: str = Body(..., embed=True), sample_rows: int = Body(5,
         return {"error": str(e)}
 
 @app.post("/tools/data_preview")
-def t_data_preview(file_id: str = Body(..., embed=True), n: int = Body(10, embed=True)):
+def t_data_preview(args: DataPreview):
     try:
-        df = DATA_MEMORY.get_df(file_id)
-        n = max(1, min(n, 100))
-        return {"file_id": file_id, "rows": df.head(n).to_dicts(), "columns": df.columns}
+        df = DATA_MEMORY.get_df(args.file_id)
+        n = max(1, min(args.n, 100))
+        return {"file_id": args.file_id, "rows": df.head(n).to_dicts(), "columns": df.columns}
     except Exception as e:
         return {"error": str(e)}
 
 @app.post("/tools/data_describe")
-def t_data_describe(file_id: str = Body(..., embed=True)):
+def t_data_describe(args: DataDescribe):
     try:
-        df = DATA_MEMORY.get_df(file_id)
+        df = DATA_MEMORY.get_df(args.file_id)
         desc = df.describe()
-        meta = DATA_MEMORY.add_summary(file_id, "describe", desc, note="numeric describe")
+        meta = DATA_MEMORY.add_summary(args.file_id, "describe", desc, note="numeric describe")
         return {"summary": meta, "rows": desc.to_dicts()}
     except Exception as e:
         return {"error": str(e)}
@@ -1216,40 +1247,22 @@ def execute_query_polars(
 
 
 @app.post("/tools/data_query_polars")
-def t_data_query_polars(
-    file_id: str | None = Body(None, embed=True),
-    summary_id: str | None = Body(None, embed=True),
-    expression: str = Body(..., embed=True),
-    save_as: str | None = Body(None, embed=True),
-    limit: int = Body(100, embed=True)
-):
+def t_data_query_polars(args: DataQuery):
     """HTTP endpoint wrapper for data_query_polars.
     
-    Extracts parameters from FastAPI Body objects and delegates to core logic.
+    Extracts parameters from Pydantic model and delegates to core logic.
     """
     return execute_query_polars(
-        file_id=file_id,
-        summary_id=summary_id,
-        expression=expression,
-        save_as=save_as,
-        limit=limit
+        file_id=args.file_id,
+        summary_id=args.summary_id,
+        expression=args.expression,
+        save_as=args.save_as,
+        limit=args.limit
     )
 
 
 @app.post("/tools/data_ng_views_table")
-def t_data_ng_views_table(
-    file_id: str | None = Body(None, embed=True),
-    summary_id: str | None = Body(None, embed=True),
-    sort_by: str | None = Body(None, embed=True),
-    descending: bool = Body(True, embed=True),
-    top_n: int = Body(5, embed=True),
-    id_column: str = Body("cell_id", embed=True),
-    center_columns: list[str] = Body(["x","y","z"], embed=True),
-    include_columns: list[str] | None = Body(None, embed=True),
-    lut: dict | None = Body(None, embed=True),
-    annotations: bool = Body(False, embed=True),
-    link_label_column: str | None = Body(None, embed=True),
-):
+def t_data_ng_views_table(args: NgViewsTable):
     """Generate multiple Neuroglancer view links (not persisted) and return a table.
 
     Strategy: mutate state sequentially but finalize CURRENT_STATE to the FIRST view
@@ -1259,43 +1272,23 @@ def t_data_ng_views_table(
     from copy import deepcopy
     global CURRENT_STATE
     warnings: list[str] = []
-    # Defensive: the default FastAPI Body(...) object (FieldInfo) is bound when we call this function directly.
-    # We do NOT want to stringify it (that produced spurious 'Unknown summary_id: annotation=...' errors).
-    from fastapi import params as _fastapi_params  # type: ignore
-    # Treat any non-string or FieldInfo-derived object as None.
-    if not isinstance(file_id, str) or isinstance(file_id, _fastapi_params.Body):
-        file_id = None
-    if not isinstance(summary_id, str) or isinstance(summary_id, _fastapi_params.Body) or (
-        isinstance(summary_id, str) and "alias='summary_id'" in summary_id
-    ):
-        summary_id = None
-    # Sanitize other params that may still be FastAPI Body objects when internal dispatcher bypasses validation
-    if isinstance(lut, _fastapi_params.Body):
-        lut = None
-    if isinstance(include_columns, _fastapi_params.Body):
-        include_columns = None
-    if isinstance(center_columns, _fastapi_params.Body) or not isinstance(center_columns, (list, tuple)):
-        center_columns = ["x","y","z"]
-    if isinstance(id_column, _fastapi_params.Body) or not isinstance(id_column, str):
-        id_column = "cell_id"
-    if isinstance(link_label_column, _fastapi_params.Body):
-        link_label_column = None
-    if isinstance(sort_by, _fastapi_params.Body):
-        sort_by = None
-    if isinstance(descending, _fastapi_params.Body):
-        descending = True
-    if isinstance(top_n, _fastapi_params.Body):
-        top_n = 5
-    if isinstance(annotations, _fastapi_params.Body):
-        annotations = False
+    
+    # Extract parameters from Pydantic model
+    file_id = args.file_id
+    summary_id = args.summary_id
+    sort_by = args.sort_by
+    descending = args.descending
+    top_n = args.top_n
+    id_column = args.id_column
+    center_columns = args.center_columns
+    include_columns = args.include_columns
+    lut = args.lut
+    annotations = args.annotations
+    link_label_column = args.link_label_column
+    
     if DEBUG_ENABLED:
-        _dbg(f"Normalized ids -> file_id={file_id} summary_id={summary_id}")
-        _dbg(
-            "Sanitized params types: "
-            f"sort_by={type(sort_by).__name__} descending={type(descending).__name__} top_n={type(top_n).__name__} "
-            f"id_column={type(id_column).__name__} center_columns={type(center_columns).__name__} include_columns={type(include_columns).__name__} "
-            f"lut={type(lut).__name__} annotations={type(annotations).__name__} link_label_column={type(link_label_column).__name__}"
-        )
+        _dbg(f"NgViewsTable params -> file_id={file_id} summary_id={summary_id}")
+    
     if not file_id and not summary_id:
         return {"error": "Must provide file_id or summary_id"}
     try:
@@ -1566,43 +1559,27 @@ def execute_plot(
 
 
 @app.post("/tools/data_plot")
-def t_data_plot(
-    file_id: str | None = Body(None, embed=True),
-    summary_id: str | None = Body(None, embed=True),
-    plot_type: str = Body("scatter", embed=True),
-    x: str = Body(..., embed=True),
-    y: str = Body(..., embed=True),
-    by: str | None = Body(None, embed=True),
-    size: str | None = Body(None, embed=True),
-    color: str | None = Body(None, embed=True),
-    stacked: bool = Body(False, embed=True),
-    title: str | None = Body(None, embed=True),
-    expression: str | None = Body(None, embed=True),
-    save_plot: bool = Body(True, embed=True),
-    width: int = Body(700, embed=True),
-    height: int = Body(400, embed=True),
-    interactive_override: bool | None = Body(None, embed=True)
-):
+def t_data_plot(args: DataPlot):
     """HTTP endpoint wrapper for data_plot.
     
     Generates interactive plot from dataframe data.
     """
     return execute_plot(
-        file_id=file_id,
-        summary_id=summary_id,
-        plot_type=plot_type,
-        x=x,
-        y=y,
-        by=by,
-        size=size,
-        color=color,
-        stacked=stacked,
-        title=title,
-        expression=expression,
-        save_plot=save_plot,
-        width=width,
-        height=height,
-        interactive_override=interactive_override
+        file_id=args.file_id,
+        summary_id=args.summary_id,
+        plot_type=args.plot_type,
+        x=args.x,
+        y=args.y,
+        by=args.by,
+        size=args.size,
+        color=args.color,
+        stacked=args.stacked,
+        title=args.title,
+        expression=args.expression,
+        save_plot=args.save_plot,
+        width=args.width,
+        height=args.height,
+        interactive_override=args.interactive_override
     )
 
 

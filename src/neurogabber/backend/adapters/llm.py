@@ -111,7 +111,7 @@ TOOLS = [
     "type": "function",
     "function": {
       "name": "ng_add_layer",
-      "description": "Add a new Neuroglancer layer (image, segmentation, or annotation). Idempotent if name exists.",
+      "description": "Add a new Neuroglancer layer (image, segmentation, or annotation). Idempotent if name exists. For annotation layers, specify annotation_color as a hex color (e.g., '#00ff00' for green, '#ff0000' for red, '#0000ff' for blue).",
       "parameters": {
         "type": "object",
         "properties": {
@@ -122,7 +122,8 @@ TOOLS = [
             {"type": "object"},
             {"type": "null"}
           ]},
-          "visible": {"type": "boolean", "default": True}
+          "visible": {"type": "boolean", "default": True},
+          "annotation_color": {"type": "string", "description": "Hex color for annotation layer (e.g., '#00ff00' for green, '#ff0000' for red). Only used for annotation layers."}
         },
         "required": ["name"]
       }
