@@ -15,6 +15,7 @@ MUTATING_TOOLS: set[str] = {
     "state_load",            # replaces entire state
     "data_ingest_csv_rois",  # may add an annotation layer
     "data_ng_views_table",   # generates multiple view mutations
+    "data_ng_annotations_from_data",  # adds annotations from dataframe rows
 }
 
 

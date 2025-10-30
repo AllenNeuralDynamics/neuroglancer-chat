@@ -120,6 +120,19 @@ class NgViewsTable(BaseModel):
     link_label_column: Optional[str] = None
 
 
+class NgAnnotationsFromData(BaseModel):
+    file_id: Optional[str] = None
+    summary_id: Optional[str] = None
+    layer_name: str
+    annotation_type: Literal["point", "box", "ellipsoid"] = "point"
+    center_columns: List[str] = ["x", "y", "z"]
+    size_columns: Optional[List[str]] = None  # For box/ellipsoid: [width, height, depth]
+    id_column: Optional[str] = None
+    color: Optional[str] = None  # Hex color like '#00ff00' for green
+    filter_expression: Optional[str] = None  # Optional Polars filter before creating annotations
+    limit: int = 1000  # Max annotations to create
+
+
 # Chat
 class ChatMessage(BaseModel):
     role: Literal["user","assistant","tool"]

@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from .models import (
     ChatRequest, SetView, SetLUT, AddAnnotations, HistogramReq, IngestCSV, SaveState,
     AddLayer, SetLayerVisibility, StateLoad, StateSummary,
-    DataInfo, DataPreview, DataDescribe, DataQuery, DataPlot, NgViewsTable
+    DataInfo, DataPreview, DataDescribe, DataQuery, DataPlot, NgViewsTable, NgAnnotationsFromData
 )
 from .tools.neuroglancer_state import (
     NeuroglancerState,
@@ -61,6 +61,7 @@ DATA_MEMORY = DataMemory()
 INTERACTION_MEMORY = InteractionMemory()
 _TRACE_HISTORY: list[dict] = []  # store recent full traces (in-memory, capped)
 _TRACE_HISTORY_MAX = 50
+LAST_QUERY_SUMMARY_ID = None  # Track most recent query result for easy reference
 
 
 def _detect_spatial_columns(df) -> tuple[list[str], str] | None:
@@ -798,6 +799,22 @@ def _truncate_tool_output(obj, max_chars: int = 4000):
         return str(obj)[:max_chars]
 
 
+def _resolve_summary_id(summary_id: str | None) -> str | None:
+    """Resolve special summary_id values like 'last' to actual IDs.
+    
+    Allows users/LLM to reference the most recent query result without
+    needing to track the exact summary_id.
+    """
+    if summary_id == "last" or summary_id == "latest":
+        if LAST_QUERY_SUMMARY_ID:
+            _dbg(f"Resolved summary_id='{summary_id}' to '{LAST_QUERY_SUMMARY_ID}'")
+            return LAST_QUERY_SUMMARY_ID
+        else:
+            _dbg(f"summary_id='{summary_id}' requested but no previous query exists")
+            return None
+    return summary_id
+
+
 def _execute_tool_by_name(name: str, args: dict):
     """Dispatcher for internal tool execution (server-side)."""
     # Directly call the endpoint functions with Pydantic model instantiation
@@ -858,6 +875,10 @@ def _execute_tool_by_name(name: str, args: dict):
         if name == "data_ng_views_table":
             from .models import NgViewsTable
             return t_data_ng_views_table(NgViewsTable(**args))
+        if name == "data_ng_annotations_from_data":
+            from .models import NgAnnotationsFromData
+            _dbg(f"Dispatching data_ng_annotations_from_data with args: {args}")
+            return t_data_ng_annotations_from_data(NgAnnotationsFromData(**args))
         if name == "data_list_plots":
             return t_data_list_plots()
     except Exception as e:  # pragma: no cover
@@ -1203,11 +1224,19 @@ def execute_query_polars(
             ng_links = _generate_ng_links_for_rows(result, spatial_cols)
             _dbg(f"Generated {len([l for l in ng_links if l])} NG links")
         
-        # Save as summary if requested
-        summary_id = None
-        if save_as:
-            DATA_MEMORY.add_summary(source_id, "query", result, note=f"Query: {expression[:100]}")
-            summary_id = save_as
+        # Always save query results (auto-save if save_as not provided)
+        global LAST_QUERY_SUMMARY_ID
+        
+        if not save_as:
+            # Auto-generate a summary name based on timestamp
+            import time
+            save_as = f"query_{int(time.time() * 1000) % 1000000}"  # Last 6 digits of timestamp
+        
+        summary_meta = DATA_MEMORY.add_summary(source_id, "query", result, note=f"Query: {expression[:100]}")
+        summary_id = summary_meta["summary_id"]
+        LAST_QUERY_SUMMARY_ID = summary_id  # Track for 'last' reference
+        
+        _dbg(f"Query result auto-saved as summary_id: {summary_id}")
         
         # Return result with hint about reusing data
         return_data = {
@@ -1216,7 +1245,8 @@ def execute_query_polars(
             "rows": len(result),
             "columns": result.columns,
             "truncated": truncated,
-            "saved_as": summary_id,
+            "summary_id": summary_id,  # Always include the auto-saved summary_id
+            "saved_as": save_as,
             "expression": expression  # Include the expression for code formatting
         }
         
@@ -1229,9 +1259,11 @@ def execute_query_polars(
             ]
             return_data["spatial_columns"] = spatial_info[0]
         
-        # Add hint for follow-up queries if data returned
+        # Add message about how to use the saved result
         if len(result) > 0:
-            return_data["hint"] = f"This result has {len(result)} rows. For follow-up filtering/analysis on this data, query the original file_id='{source_id}' with additional filters."
+            return_data["message"] = f"✅ Query executed successfully. Data is being rendered in an interactive table widget. Do NOT format, display, or summarize the data - it's already handled by the frontend. Result saved as summary_id='{summary_id}' ({len(result)} rows). You can use this summary_id in follow-up tools like data_ng_annotations_from_data, data_plot, or for further queries."
+        else:
+            return_data["message"] = f"✅ Query executed successfully (0 rows). Result saved as summary_id='{summary_id}'."
         
         return return_data
     
@@ -1392,6 +1424,173 @@ def t_data_ng_views_table(args: NgViewsTable):
         }
     except Exception as e:
         import traceback
+        return {"error": str(e), "trace": traceback.format_exc()}
+
+
+@app.post("/tools/data_ng_annotations_from_data")
+def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
+    """Create Neuroglancer annotations directly from dataframe rows.
+    
+    Each row in the source dataframe becomes one annotation. This is the preferred
+    way to add annotations from tabular data (rather than data_query_polars + ng_annotations_add
+    which doesn't work due to data isolation).
+    """
+    global CURRENT_STATE
+    
+    file_id = args.file_id
+    summary_id = _resolve_summary_id(args.summary_id)  # Resolve 'last' or 'latest' to actual ID
+    layer_name = args.layer_name
+    annotation_type = args.annotation_type
+    center_columns = args.center_columns
+    size_columns = args.size_columns
+    id_column = args.id_column
+    color = args.color
+    filter_expression = args.filter_expression
+    limit = args.limit
+    
+    if DEBUG_ENABLED:
+        _dbg(f"data_ng_annotations_from_data -> file_id={file_id} summary_id={summary_id} layer={layer_name}")
+    
+    # Validate inputs
+    if not file_id and not summary_id:
+        # Auto-select: prefer most recent query result, fallback to most recent file
+        if LAST_QUERY_SUMMARY_ID:
+            summary_id = LAST_QUERY_SUMMARY_ID
+            _dbg(f"Auto-selected most recent query result: {summary_id}")
+        else:
+            files = DATA_MEMORY.list_files()
+            if files:
+                file_id = files[-1]["file_id"]
+                _dbg(f"No recent query, auto-selected most recent file: {file_id}")
+            else:
+                return {"error": "No file_id or summary_id provided and no files uploaded"}
+    
+    if file_id and summary_id:
+        return {"error": "Provide either file_id OR summary_id, not both"}
+    
+    try:
+        # Get source dataframe
+        if file_id:
+            df = DATA_MEMORY.get_df(file_id)
+            source_fid = file_id
+        else:
+            df = DATA_MEMORY.get_summary_df(summary_id)
+            source_fid = DATA_MEMORY.get_summary_record(summary_id).source_file_id
+        
+        # Apply filter expression if provided
+        if filter_expression:
+            _dbg(f"Applying filter_expression: {filter_expression[:200]}")
+            try:
+                namespace = {'pl': pl, 'df': df, '__builtins__': {}}
+                result = eval(filter_expression, namespace, {})
+                
+                if isinstance(result, pl.DataFrame):
+                    df = result
+                elif isinstance(result, pl.Series):
+                    df = pl.DataFrame({result.name or "value": result})
+                else:
+                    return {"error": f"filter_expression must return a DataFrame or Series, got {type(result).__name__}"}
+            except Exception as e:
+                return {"error": f"filter_expression failed: {e}"}
+        
+        # Validate required columns exist
+        missing_cols = [c for c in center_columns if c not in df.columns]
+        if missing_cols:
+            return {"error": f"Missing required center columns: {missing_cols}", "available_columns": df.columns}
+        
+        if annotation_type in ["box", "ellipsoid"] and not size_columns:
+            return {"error": f"annotation_type '{annotation_type}' requires size_columns parameter"}
+        
+        if size_columns:
+            missing_size_cols = [c for c in size_columns if c not in df.columns]
+            if missing_size_cols:
+                return {"error": f"Missing size columns: {missing_size_cols}", "available_columns": df.columns}
+        
+        # Limit rows
+        if df.height > limit:
+            _dbg(f"Limiting from {df.height} to {limit} rows")
+            df = df.head(limit)
+        
+        # Create annotation layer if it doesn't exist, or ensure it exists with color
+        layer_exists = any(L.get("name") == layer_name and L.get("type") == "annotation" 
+                          for L in CURRENT_STATE.data.get("layers", []))
+        
+        if not layer_exists:
+            CURRENT_STATE.add_layer(layer_name, "annotation", annotation_color=color)
+            _dbg(f"Created annotation layer '{layer_name}' with color {color}")
+        elif color:
+            # Update color on existing layer
+            for L in CURRENT_STATE.data.get("layers", []):
+                if L.get("name") == layer_name and L.get("type") == "annotation":
+                    L["annotationColor"] = color
+                    _dbg(f"Updated color on existing layer '{layer_name}' to {color}")
+                    break
+        
+        # Build annotation items from dataframe rows
+        items = []
+        for idx, row in enumerate(df.to_dicts()):
+            try:
+                cx = float(row[center_columns[0]])
+                cy = float(row[center_columns[1]])
+                cz = float(row[center_columns[2]])
+                
+                # Generate unique ID: prefer id_column if provided, otherwise generate UUID
+                if id_column and id_column in row:
+                    ann_id = str(row[id_column])
+                else:
+                    import uuid
+                    ann_id = str(uuid.uuid4())
+                
+                if annotation_type == "point":
+                    items.append({
+                        "point": [cx, cy, cz],
+                        "type": "point",
+                        "id": ann_id
+                    })
+                elif annotation_type == "box":
+                    sx = float(row[size_columns[0]])
+                    sy = float(row[size_columns[1]])
+                    sz = float(row[size_columns[2]])
+                    items.append({
+                        "type": "axis_aligned_bounding_box",
+                        "pointA": [cx - sx/2, cy - sy/2, cz - sz/2],
+                        "pointB": [cx + sx/2, cy + sy/2, cz + sz/2],
+                        "id": ann_id
+                    })
+                elif annotation_type == "ellipsoid":
+                    rx = float(row[size_columns[0]]) / 2
+                    ry = float(row[size_columns[1]]) / 2
+                    rz = float(row[size_columns[2]]) / 2
+                    items.append({
+                        "type": "ellipsoid",
+                        "center": [cx, cy, cz],
+                        "radii": [rx, ry, rz],
+                        "id": ann_id
+                    })
+            except Exception as e:
+                _dbg(f"Skipping row {idx} due to error: {e}")
+                continue
+        
+        if not items:
+            return {"error": "No valid annotation items created from dataframe"}
+        
+        # Add annotations to the layer
+        CURRENT_STATE.add_annotations(layer_name, items)
+        
+        _dbg(f"Added {len(items)} annotations to layer '{layer_name}'")
+        
+        return {
+            "ok": True,
+            "layer": layer_name,
+            "annotation_type": annotation_type,
+            "count": len(items),
+            "source": source_fid,
+            "message": f"✅ Added {len(items)} {annotation_type} annotations to layer '{layer_name}'"
+        }
+        
+    except Exception as e:
+        import traceback
+        logger.exception("data_ng_annotations_from_data error")
         return {"error": str(e), "trace": traceback.format_exc()}
 
 

@@ -85,10 +85,12 @@ class PlotRecord:
 class DataMemory:
     """Ephemeral session-scoped data store for uploaded CSVs & derived summaries."""
 
-    def __init__(self):
+    def __init__(self, max_summaries: int = 100):
         self.files: Dict[str, UploadedFileRecord] = {}
         self.summaries: Dict[str, SummaryRecord] = {}
         self.plots: Dict[str, PlotRecord] = {}
+        self.max_summaries = max_summaries
+        self.summary_order: List[str] = []  # Track insertion order for LRU
 
     def add_file(self, name: str, raw: bytes) -> dict:
         if len(raw) > MAX_FILE_BYTES:
@@ -113,9 +115,18 @@ class DataMemory:
     def add_summary(
         self, file_id: str, kind: str, df: pl.DataFrame, note: str | None = None
     ) -> dict:
+        # Enforce max summaries limit (LRU eviction)
+        if len(self.summaries) >= self.max_summaries:
+            # Remove oldest summary
+            if self.summary_order:
+                oldest_id = self.summary_order.pop(0)
+                if oldest_id in self.summaries:
+                    del self.summaries[oldest_id]
+        
         sid = uuid.uuid4().hex[:8]
         rec = SummaryRecord(sid, file_id, kind, df, note)
         self.summaries[sid] = rec
+        self.summary_order.append(sid)
         return rec.to_meta()
 
     def list_summaries(self) -> List[dict]:

@@ -24,6 +24,22 @@ Decision rules:
 - After performing modifications, if the user requests a link or updated view, call ng_state_link (NOT state_save) to return a masked markdown hyperlink. Only call state_save when explicit persistence is requested (e.g. 'save', 'persist', 'store').
 - Do not paste raw Neuroglancer URLs directly; always rely on ng_state_link for sharing the current view.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚨 POLARS SYNTAX - CRITICAL DIFFERENCES FROM PANDAS 🚨
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ THIS IS POLARS, NOT PANDAS! Key differences:
+
+❌ WRONG (pandas):          ✅ CORRECT (Polars):
+   df.groupby('col')            df.group_by('col')         [underscore!]
+   .sort(reverse=True)          .sort(descending=True)     [different param!]
+   df['col'].max()              df.select(pl.max('col'))   [use pl functions!]
+
+Common ERROR patterns to AVOID:
+• df.groupby() → TypeError ❌  USE: df.group_by() ✓
+• sort(reverse=True) → TypeError ❌  USE: sort(descending=True) ✓
+• Accessing columns with brackets in aggregations ❌  USE: pl.col() ✓
+
 Dataframe rules - ACTION REQUIRED:
 - ANY question about CSV/dataframe content = IMMEDIATE tool call. Do NOT respond with text first.
 - When the user mentions "data", "dataframe", "file", or "csv" without specifying which file, ALWAYS use the most recent file (shown in Data context).
@@ -31,10 +47,8 @@ Dataframe rules - ACTION REQUIRED:
 - For simple operations, use specific tools (data_preview, data_describe).
 - For complex queries (multiple filters, aggregations, computed columns, sorting), use data_query_polars with a Polars expression.
 - In data_query_polars: use 'df' for the dataframe and 'pl' for Polars functions. All standard Polars operations are supported.
-- ⚠️ CRITICAL: This is POLARS not pandas. NEVER use groupby() - it will ERROR. ALWAYS use group_by() with underscore.
-- ⚠️ WRONG: df.groupby('col') ❌ RIGHT: df.group_by('col') ✓
-- Common Polars patterns (NOTE THE UNDERSCORES):
-  * Grouping: df.group_by('col').agg(pl.col('value').max())  [NOT groupby!]
+- Common Polars patterns:
+  * Grouping: df.group_by('col').agg(pl.col('value').max())
   * Filtering: df.filter(pl.col('x') > 5)
   * Selecting: df.select(['col1', 'col2'])
   * Sorting: df.sort('col') or df.sort('col', descending=True)
@@ -44,6 +58,104 @@ Dataframe rules - ACTION REQUIRED:
   * Example: df.group_by('cluster_id').agg(pl.first('x'), pl.first('y'), pl.first('z'), pl.first('cell_id'))
   * When using .sample(), the spatial columns are automatically included.
 - If you want to reuse a query result, use save_as parameter to store it as a summary table, then reference it with summary_id in subsequent queries.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+� QUERY RESULT CHAINING - CRITICAL FOR MULTI-STEP WORKFLOWS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ IMPORTANT: All data_query_polars results are AUTOMATICALLY SAVED!
+• Every query returns a summary_id in the response
+• You can use that summary_id for follow-up operations
+• Query results contain the TRANSFORMED data (filtered/aggregated/etc.)
+• SHORTCUT: Use summary_id="last" OR omit both file_id and summary_id to use the most recent query
+
+Example: "Get top cell per cluster and annotate them"
+
+✅ CORRECT Option 1 (Use explicit summary_id):
+   Step 1: data_query_polars(
+       file_id="abc123",
+       expression="df.group_by('cluster_label').agg(...)"
+   )
+   → Response: {"summary_id": "query_789", "rows": 20, ...}
+   
+   Step 2: data_ng_annotations_from_data(
+       summary_id="query_789",  # ← Explicit summary_id
+       layer_name="Clusters",
+       ...
+   )
+
+✅ CORRECT Option 2 (Use "last" shorthand):
+   Step 1: data_query_polars(expression="...")
+   Step 2: data_ng_annotations_from_data(
+       summary_id="last",  # ← Automatic reference to most recent query
+       layer_name="Clusters",
+       ...
+   )
+
+✅ CORRECT Option 3 (Omit both - auto-uses last query):
+   Step 1: data_query_polars(expression="...")
+   Step 2: data_ng_annotations_from_data(
+       # No file_id or summary_id → automatically uses last query result
+       layer_name="Clusters",
+       ...
+   )
+
+❌ WRONG (Using original file_id):
+   Step 1: data_query_polars(file_id="abc123", expression="...")
+   Step 2: data_ng_annotations_from_data(file_id="abc123", ...)  # ← WRONG!
+   → Creates annotations from ALL cells in original file, not the query result! ✗
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+�📚 WORKFLOW RECIPES - Common Task Patterns
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Recipe 1: ADD ANNOTATION POINTS FROM FILTERED/AGGREGATED DATA
+Task: "Add annotation points for the top cell in each cluster"
+
+✅ OPTION A (Recommended - Two-step with auto-saved summary_id):
+   Step 1: data_query_polars(
+       file_id="...",
+       expression="df.group_by('cluster_label').agg(pl.first('centroid_x'), pl.first('centroid_y'), pl.first('centroid_z'), pl.max('log_volume'))"
+   )
+   → Note the summary_id in the response!
+   
+   Step 2: data_ng_annotations_from_data(
+       summary_id="<use_summary_id_from_step_1>",  # ← Critical!
+       layer_name="Clusters",
+       center_columns=["centroid_x", "centroid_y", "centroid_z"],
+       color="#00ff00"
+   )
+
+✅ OPTION B (Single-call with filter_expression):
+   data_ng_annotations_from_data(
+       file_id="...",
+       filter_expression="df.group_by('cluster_label').agg(pl.first('centroid_x'), pl.first('centroid_y'), pl.first('centroid_z'), pl.max('log_volume'))",
+       layer_name="Clusters",
+       center_columns=["centroid_x", "centroid_y", "centroid_z"],
+       color="#00ff00"
+   )
+
+❌ WRONG (Don't use original file_id after querying):
+   data_query_polars(file_id="...", expression="...")
+   data_ng_annotations_from_data(file_id="...", ...)  # Uses wrong data!
+
+Recipe 2: GET TOP N BY METRIC WITH SPATIAL DATA
+Task: "Show me top 5 cells by volume in each cluster"
+✅ Use: data_query_polars with FULL aggregation including spatial columns
+   Expression: "df.group_by('cluster_id').agg(
+                  pl.max('volume').alias('max_volume'),
+                  pl.first('centroid_x'),
+                  pl.first('centroid_y'), 
+                  pl.first('centroid_z'),
+                  pl.first('cell_id')
+                ).sort('max_volume', descending=True).head(5)"
+
+Recipe 3: INTERACTIVE VIEW TABLE WITH LINKS
+Task: "Create clickable links to view top cells"
+✅ Use: data_ng_views_table
+   - Automatically generates Neuroglancer links
+   - Returns table with click-to-view functionality
+   - First view is auto-loaded
 - ⚠️ CRITICAL: When you receive tool results from data_query_polars, DO NOT format, summarize, or display the data in ANY way.
   * The tool returns "data" in a structured format that goes DIRECTLY to the frontend
   * The frontend automatically renders an interactive table widget with the expression displayed above it
@@ -252,6 +364,29 @@ DATA_TOOLS = [
         },
         # Note: cannot express mutual exclusivity without oneOf (disallowed by OpenAI);
         # model should infer to supply only one of file_id or summary_id.
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "data_ng_annotations_from_data",
+      "description": "Create Neuroglancer annotation points/boxes/ellipsoids directly from dataframe rows. Each row becomes one annotation at the specified spatial coordinates. IMPORTANT: If you just called data_query_polars, use the returned summary_id (NOT the original file_id) to annotate the QUERY RESULT. Optionally use filter_expression to transform data inline.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_id": {"type": "string", "description": "Source file id. Use this ONLY if annotating the full original dataset. If you just ran a query, use summary_id instead!"},
+          "summary_id": {"type": "string", "description": "ID of saved query result (returned by data_query_polars). Use 'last' to reference the most recent query. CRITICAL: Use this when creating annotations from filtered/aggregated data, not the original file_id!"},
+          "layer_name": {"type": "string", "description": "Name of annotation layer to create/add to"},
+          "annotation_type": {"type": "string", "enum": ["point", "box", "ellipsoid"], "default": "point"},
+          "center_columns": {"type": "array", "items": {"type": "string"}, "default": ["x", "y", "z"], "description": "Column names for x,y,z coordinates (e.g., ['centroid_x', 'centroid_y', 'centroid_z'])"},
+          "size_columns": {"type": "array", "items": {"type": "string"}, "description": "For box/ellipsoid: column names for width,height,depth dimensions"},
+          "id_column": {"type": "string", "description": "Optional: column to use for annotation IDs (e.g., 'cell_id')"},
+          "color": {"type": "string", "description": "Hex color for layer (e.g., '#00ff00' for green, '#ff0000' for red)"},
+          "filter_expression": {"type": "string", "description": "Optional Polars expression to filter/transform data before creating annotations. Use 'df' for dataframe. Example: 'df.filter(pl.col(\"cluster_id\") == 3).head(10)' or 'df.group_by(\"cluster_label\").agg(pl.first(\"centroid_x\"), pl.first(\"centroid_y\"), pl.first(\"centroid_z\"), pl.max(\"log_volume\"))'"},
+          "limit": {"type": "integer", "default": 1000, "minimum": 1, "maximum": 5000, "description": "Maximum number of annotations to create"}
+        },
+        "required": ["layer_name"]
       }
     }
   },
