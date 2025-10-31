@@ -1791,3 +1791,24 @@ def t_data_list_plots():
 # ==============================================================================
 # End Plotting Tools
 # ==============================================================================
+
+@app.post("/system/reset")
+def system_reset():
+    """Reset the entire application state - clear all memory, data, and chat history."""
+    global CURRENT_STATE, DATA_MEMORY, INTERACTION_MEMORY, _TRACE_HISTORY, LAST_QUERY_SUMMARY_ID
+    
+    logger.info("🔄 System reset requested - clearing all state")
+    
+    # Reset all global state variables to fresh instances
+    CURRENT_STATE = NeuroglancerState()
+    DATA_MEMORY = DataMemory()
+    INTERACTION_MEMORY = InteractionMemory()
+    _TRACE_HISTORY = []
+    LAST_QUERY_SUMMARY_ID = None
+    
+    logger.info("✅ System reset complete - all memory flushed")
+    
+    return {
+        "status": "success",
+        "message": "Application state has been reset. All data, chat history, and memory have been cleared."
+    }

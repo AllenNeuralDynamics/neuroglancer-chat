@@ -48,6 +48,132 @@ last_loaded_url: str | None = None
 _trace_history = []
 _full_table_data = {}  # Store full table data for modal: {message_id: full_table_text}
 
+# Preview card components - separate for Data Upload and Summaries tabs
+
+# Data Upload preview
+data_upload_preview_content = pn.Column(
+    pn.pane.Markdown("*Click an eye icon to preview data*", sizing_mode="stretch_width"),
+    sizing_mode="stretch_both",
+    min_height=300,
+)
+
+data_upload_preview_close_btn = pn.widgets.Button(
+    name="✕ Close Preview",
+    button_type="default",
+    sizing_mode="fixed",
+    width=120,
+    margin=(0, 0, 10, 0)
+)
+
+def _clear_data_upload_preview(event=None):
+    """Clear data upload preview and show placeholder."""
+    data_upload_preview_content.clear()
+    data_upload_preview_content.append(
+        pn.pane.Markdown("*Click an eye icon to preview data*", sizing_mode="stretch_width")
+    )
+
+data_upload_preview_close_btn.on_click(_clear_data_upload_preview)
+
+data_upload_preview_card = pn.Card(
+    data_upload_preview_close_btn,
+    data_upload_preview_content,
+    title="Preview",
+    collapsed=False,
+    sizing_mode="stretch_both",
+    min_width=350,
+    margin=(0, 0, 0, 10),
+)
+
+# Summaries preview
+summaries_preview_content = pn.Column(
+    pn.pane.Markdown("*Click an eye icon to preview summary*", sizing_mode="stretch_width"),
+    sizing_mode="stretch_both",
+    min_height=300,
+)
+
+summaries_preview_close_btn = pn.widgets.Button(
+    name="✕ Close Preview",
+    button_type="default",
+    sizing_mode="fixed",
+    width=120,
+    margin=(0, 0, 10, 0)
+)
+
+def _clear_summaries_preview(event=None):
+    """Clear summaries preview and show placeholder."""
+    summaries_preview_content.clear()
+    summaries_preview_content.append(
+        pn.pane.Markdown("*Click an eye icon to preview summary*", sizing_mode="stretch_width")
+    )
+
+summaries_preview_close_btn.on_click(_clear_summaries_preview)
+
+summaries_preview_card = pn.Card(
+    summaries_preview_close_btn,
+    summaries_preview_content,
+    title="Preview",
+    collapsed=False,
+    sizing_mode="stretch_both",
+    min_width=350,
+    margin=(0, 0, 0, 10),
+)
+
+def _update_preview(file_id: str = None, summary_id: str = None, is_summary: bool = False):
+    """Update preview card with data from backend."""
+    # Choose the right preview card based on type
+    if is_summary:
+        preview_content = summaries_preview_content
+    else:
+        preview_content = data_upload_preview_content
+    
+    try:
+        logger.info(f"Updating preview: file_id={file_id}, summary_id={summary_id}, is_summary={is_summary}")
+        
+        # Show loading
+        preview_content.clear()
+        preview_content.append(pn.pane.Markdown("Loading..."))
+        
+        # Fetch preview data from backend
+        with httpx.Client(timeout=30) as client:
+            if is_summary:
+                resp = client.post(f"{BACKEND}/tools/data_preview", json={"file_id": summary_id, "n": 20})
+            else:
+                resp = client.post(f"{BACKEND}/tools/data_preview", json={"file_id": file_id, "n": 20})
+            
+            data = resp.json()
+            
+            if data.get("error"):
+                preview_content.clear()
+                preview_content.append(pn.pane.Markdown(f"**Error:** {data.get('error')}"))
+                return
+            
+            # Create tabulator from preview data
+            rows = data.get("rows", [])
+            if rows:
+                df = pd.DataFrame(rows)
+                preview_table = pn.widgets.Tabulator(
+                    df,
+                    disabled=True,
+                    show_index=False,
+                    sizing_mode="stretch_both",
+                    min_height=300,
+                    pagination="local",
+                    page_size=20,
+                )
+                title = f"**Preview:** {summary_id if is_summary else file_id} ({len(rows)} rows)"
+                # Replace content
+                preview_content.clear()
+                preview_content.append(pn.pane.Markdown(title))
+                preview_content.append(preview_table)
+            else:
+                preview_content.clear()
+                preview_content.append(pn.pane.Markdown("No data to preview."))
+                
+    except Exception as e:
+        logger.exception("Preview update error")
+        preview_content.clear()
+        preview_content.append(pn.pane.Markdown(f"**Error:** {e}"))
+
 # Mutation detection now handled server-side; state link returned directly when mutated.
 
 # Settings widgets
@@ -95,6 +221,30 @@ def _open_latest(_):
 
 open_latest_btn = pn.widgets.Button(name="Open latest link", button_type="primary")
 open_latest_btn.on_click(_open_latest)
+
+def _reset_app(_):
+    """Reset the entire application - clears backend memory and reloads the frontend."""
+    try:
+        status.object = "Resetting application..."
+        
+        # Call backend reset endpoint
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(f"{BACKEND}/system/reset")
+            data = resp.json()
+            
+            if data.get("status") == "success":
+                status.object = "✅ Reset complete - reloading page..."
+                # Reload the page to get a fresh frontend instance
+                # Using JavaScript to reload after a brief delay
+                pn.state.execute_script("setTimeout(() => window.location.reload(), 1000)")
+            else:
+                status.object = f"❌ Reset failed: {data.get('message', 'Unknown error')}"
+    except Exception as e:
+        logger.exception("Reset failed")
+        status.object = f"❌ Reset failed: {e}"
+
+reset_app_btn = pn.widgets.Button(name="🔄 Reset App", button_type="danger", width=150)
+reset_app_btn.on_click(_reset_app)
 
 async def _notify_backend_state_load(url: str):
     """Inform backend that the widget loaded a new NG URL so CURRENT_STATE is in sync.
@@ -1029,6 +1179,9 @@ chat = ChatInterface(
 # ---------------- Settings UI ----------------
 settings_card = pn.Card(
     pn.Column(
+        pn.pane.Markdown("**System Controls**"),
+        reset_app_btn,
+        pn.pane.Markdown("---"),  # Visual separator
         auto_load_checkbox,
         show_query_tables,
         latest_url,
@@ -1060,7 +1213,7 @@ if pd is not None:
     uploaded_table = pn.widgets.Tabulator(
         pd.DataFrame(columns=["file_id","name","size","n_rows","n_cols"]),
         height=0,  # start collapsed until data present
-        disabled=True,
+        disabled=False,  # Enable interaction for preview button
         show_index=False,
         sizing_mode="stretch_width",
         layout="fit_columns",  # Stretch columns to fill available width
@@ -1068,12 +1221,44 @@ if pd is not None:
             'preview': "<i class='fa fa-eye' title='Preview file'></i>",
         },
     )
+    
+    # Add click handler for uploaded_table preview button
+    def _on_uploaded_table_click(event):
+        if event.column == 'preview' and event.row is not None:
+            try:
+                df = uploaded_table.value
+                if df is not None and len(df) > event.row:
+                    file_id = df.iloc[event.row].get('file_id')
+                    if file_id:
+                        _update_preview(file_id=file_id, is_summary=False)
+            except Exception as e:
+                logger.error(f"Error handling preview click: {e}")
+    
+    uploaded_table.on_click(_on_uploaded_table_click)
+    
     summaries_table = pn.widgets.Tabulator(
         pd.DataFrame(columns=["summary_id","source_file_id","kind","n_rows","n_cols"]),
         height=0,
-        disabled=True,
+        disabled=False,  # Enable interaction for preview button
         show_index=False,
+        buttons={
+            'preview': "<i class='fa fa-eye' title='Preview summary'></i>",
+        },
     )
+    
+    # Add click handler for summaries_table preview button
+    def _on_summaries_table_click(event):
+        if event.column == 'preview' and event.row is not None:
+            try:
+                df = summaries_table.value
+                if df is not None and len(df) > event.row:
+                    summary_id = df.iloc[event.row].get('summary_id')
+                    if summary_id:
+                        _update_preview(summary_id=summary_id, is_summary=True)
+            except Exception as e:
+                logger.error(f"Error handling summary preview click: {e}")
+    
+    summaries_table.on_click(_on_summaries_table_click)
 else:
     uploaded_table = pn.pane.Markdown("pandas not available")
     summaries_table = pn.pane.Markdown("pandas not available")
@@ -1085,9 +1270,17 @@ def _update_upload_card_title(n: int):
         # Update the tab title (will be set after workspace_tabs is created)
         # This is called during refresh, tabs will exist by then
         if 'workspace_tabs' in globals():
-            workspace_tabs[1] = (f"Data Upload (📁 {n} {label})", data_upload_content)
+            workspace_tabs[0] = (f"Data Upload (📁 {n} {label})", data_upload_content)
     except Exception:
         # Fallback silently; title update is non-critical
+        pass
+
+# Helper to update summaries tab title with dynamic count
+def _update_summaries_card_title(n: int):
+    try:
+        if 'workspace_tabs' in globals():
+            workspace_tabs[1] = (f"Summaries (📋 {n})", summaries_content)
+    except Exception:
         pass
 
 def _refresh_files():
@@ -1100,17 +1293,22 @@ def _refresh_files():
         _update_upload_card_title(len(data))
         if data:
             df = pd.DataFrame(data)
-            # Reorder with name first, keep file_id (hidden) at end for potential future use
-            desired = [c for c in ["name","size","n_rows","n_cols","file_id"] if c in df.columns]
+            # Add preview column
+            df['preview'] = ''
+            # Reorder with name first, preview at end, keep file_id (hidden)
+            desired = [c for c in ["name","size","n_rows","n_cols","preview","file_id"] if c in df.columns]
             df = df[desired]
             # Rename display columns
-            rename_map = {"name":"Name","size":"Size","n_rows":"Rows","n_cols":"Cols"}
+            rename_map = {"name":"Name","size":"Size","n_rows":"Rows","n_cols":"Cols","preview":"Preview"}
             df = df.rename(columns=rename_map)
             uploaded_table.value = df
             # Hide file_id if present
             hidden_cols = [c for c in ["file_id"] if c in df.columns]
             if hidden_cols:
                 uploaded_table.hidden_columns = hidden_cols
+            # Set column widths
+            uploaded_table.widths = {'Preview': 60}
+            uploaded_table.titles = {'Preview': 'Preview'}
             # Dynamic height: ~40px per row (estimated row height incl. header). Cap at 5 rows.
             n_rows = len(df)
             per = 50
@@ -1138,17 +1336,23 @@ def _refresh_summaries():
         with httpx.Client(timeout=30) as client:
             lst = client.post(f"{BACKEND}/tools/data_list_summaries")
             data = lst.json().get("summaries", [])
+        _update_summaries_card_title(len(data))
         if data:
             df = pd.DataFrame(data)
-            # Reorder with kind first; retain IDs (hidden) for possible referencing
-            desired_order = [c for c in ["kind","n_rows","n_cols","summary_id","source_file_id"] if c in df.columns]
+            # Add preview column
+            df['preview'] = ''
+            # Reorder with kind first, preview at end; retain IDs (hidden)
+            desired_order = [c for c in ["kind","n_rows","n_cols","preview","summary_id","source_file_id"] if c in df.columns]
             df = df[desired_order]
-            rename_map = {"kind":"Kind","n_rows":"Rows","n_cols":"Cols"}
+            rename_map = {"kind":"Kind","n_rows":"Rows","n_cols":"Cols","preview":"Preview"}
             df = df.rename(columns=rename_map)
             summaries_table.value = df
             hidden_cols = [c for c in ["summary_id","source_file_id"] if c in df.columns]
             if hidden_cols:
                 summaries_table.hidden_columns = hidden_cols
+            # Set column widths
+            summaries_table.widths = {'Preview': 60}
+            summaries_table.titles = {'Preview': 'Preview'}
             n_rows = len(df)
             per = 40
             cap = 5
@@ -1282,9 +1486,9 @@ def _add_result_to_workspace_from_data(query_data: dict, query_summary: str = No
         oldest = workspace_results_list.pop(0)
         workspace_results_container.remove(oldest)
     
-    # Update Results tab title with counter
+    # Update Results tab title with counter (Results is now tab 2)
     if 'workspace_tabs' in globals():
-        workspace_tabs[0] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
+        workspace_tabs[2] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
 
 
 def _add_result_to_workspace(full_table_text: str, ng_views_data: list = None, query_summary: str = None):
@@ -1337,9 +1541,9 @@ def _add_result_to_workspace(full_table_text: str, ng_views_data: list = None, q
         oldest = workspace_results_list.pop(0)
         workspace_results_container.remove(oldest)
     
-    # Update Results tab title with counter
+    # Update Results tab title with counter (Results is now tab 2)
     if 'workspace_tabs' in globals():
-        workspace_tabs[0] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
+        workspace_tabs[2] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
 
 
 def _add_plot_to_workspace(plot_pane, plot_type: str = "plot", plot_summary: str = None):
@@ -1391,9 +1595,9 @@ def _add_plot_to_workspace(plot_pane, plot_type: str = "plot", plot_summary: str
         oldest = workspace_results_list.pop(0)
         workspace_results_container.remove(oldest)
     
-    # Update Results tab title with counter
+    # Update Results tab title with counter (Results is now tab 2)
     if 'workspace_tabs' in globals():
-        workspace_tabs[0] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
+        workspace_tabs[2] = (f"Results (📊 {len(workspace_results_list)})", workspace_body)
 
 
 workspace_header = pn.pane.Markdown("### Query Results\n_Full tables and visualizations appear here._", margin=(0, 0, 10, 0))
@@ -1410,15 +1614,15 @@ workspace_expanded = pn.widgets.Toggle(
 )
 
 def toggle_workspace_height(event):
-    """Toggle workspace height between compact (400px) and expanded (800px)"""
+    """Toggle workspace height between compact (600px) and expanded (800px)"""
     if event.new:
         workspace_tabs.styles = {"maxHeight": "800px", "overflow": "auto"}
         workspace_card.styles = {"maxHeight": "800px", "overflow": "auto"}
         workspace_expanded.name = "⬆ Compact Workspace ⬆"
         workspace_expanded.button_type = "primary"
     else:
-        workspace_tabs.styles = {"maxHeight": "400px", "overflow": "auto"}
-        workspace_card.styles = {"maxHeight": "400px", "overflow": "auto"}
+        workspace_tabs.styles = {"maxHeight": "600px", "overflow": "auto"}
+        workspace_card.styles = {"maxHeight": "600px", "overflow": "auto"}
         workspace_expanded.name = "⬍ Expand Workspace ⬍"
         workspace_expanded.button_type = "default"
 
@@ -1431,32 +1635,53 @@ workspace_body = pn.Column(
     scroll=True,
 )
 
-# Data upload tab content (constrain width to prevent stretching)
-data_upload_content = pn.Column(
+# Data upload tab content with preview card side-by-side
+data_upload_left = pn.Column(
     file_drop,
     upload_notice,
     uploaded_table,
     sizing_mode="stretch_width",
-    max_width=800,  # Allow wider to fill workspace area
-    margin=(10, 10, 10, 10)
+    margin=(10, 10, 10, 10),
+    min_width=400,
 )
+
+# Use GridSpec for proper 2-column layout with percentage-based widths
+data_upload_grid = pn.GridSpec(sizing_mode='stretch_width', margin=0)
+data_upload_grid[0, 0:4] = data_upload_left           # Takes 30% (3 out of 10 columns)
+data_upload_grid[0, 4:10] = data_upload_preview_card  # Takes 70% (7 out of 10 columns)
+data_upload_content = data_upload_grid
+
+# Summaries tab content with preview card side-by-side
+summaries_left = pn.Column(
+    summaries_table,
+    sizing_mode="stretch_width",
+    margin=(10, 10, 10, 10),
+    min_width=400,
+)
+
+# Use GridSpec for proper 2-column layout
+summaries_grid = pn.GridSpec(sizing_mode='stretch_width', margin=0)
+summaries_grid[0, 0:4] = summaries_left           # Takes 30%
+summaries_grid[0, 4:10] = summaries_preview_card  # Takes 70%
+summaries_content = summaries_grid
 
 # Create tabbed workspace panel
 workspace_tabs = pn.Tabs(
-    ("Results", workspace_body),
-    ("Data Upload", data_upload_content),
+    ("Data Upload (📁 0 files)", data_upload_content),
+    ("Summaries (📋 0)", summaries_content),
+    ("Results (📊 0)", workspace_body),
     dynamic=True,
     sizing_mode="stretch_width",
-    styles={"maxHeight": "400px", "overflow": "auto"},
+    styles={"maxHeight": "600px", "overflow": "auto"},
 )
 
-# Constrain height to 400px with scrolling inside (can be toggled to 800px)
+# Constrain height to 600px with scrolling inside (can be toggled to 800px)
 workspace_card = pn.Card(
     workspace_tabs,
     title="Workspace",
-    collapsed=True,
+    collapsed=False,  # Open at startup
     sizing_mode="stretch_width",
-    styles={"maxHeight": "400px", "overflow": "auto"},
+    styles={"maxHeight": "600px", "overflow": "auto"},
     margin=(0, 0, 10, 0)
 )
 
