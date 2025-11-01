@@ -223,25 +223,26 @@ open_latest_btn = pn.widgets.Button(name="Open latest link", button_type="primar
 open_latest_btn.on_click(_open_latest)
 
 def _reset_app(_):
-    """Reset the entire application - clears backend memory and reloads the frontend."""
+    """Reset the application by reloading the page to get fresh frontend and backend state."""
     try:
-        status.object = "Resetting application..."
+        status.object = "🔄 Resetting application..."
+        logger.info("User requested app reset - reloading page")
         
-        # Call backend reset endpoint
-        with httpx.Client(timeout=10) as client:
-            resp = client.post(f"{BACKEND}/system/reset")
-            data = resp.json()
-            
-            if data.get("status") == "success":
-                status.object = "✅ Reset complete - reloading page..."
-                # Reload the page to get a fresh frontend instance
-                # Using JavaScript to reload after a brief delay
-                pn.state.execute_script("setTimeout(() => window.location.reload(), 1000)")
-            else:
-                status.object = f"❌ Reset failed: {data.get('message', 'Unknown error')}"
+        # Simple solution: Just reload the page
+        # This gives a fresh Panel instance and the backend will reset conversation on next use
+        def do_reload():
+            pn.state.location.reload = True
+        
+        from bokeh.io import curdoc
+        if curdoc():
+            curdoc().add_next_tick_callback(do_reload)
+        else:
+            # Fallback if not in a document context
+            status.object = "Please refresh your browser to reset the app"
+        
     except Exception as e:
-        logger.exception("Reset failed")
-        status.object = f"❌ Reset failed: {e}"
+        logger.exception("Reset page reload failed")
+        status.object = f"❌ Reset failed: {type(e).__name__}: {e}"
 
 reset_app_btn = pn.widgets.Button(name="🔄 Reset App", button_type="danger", width=150)
 reset_app_btn.on_click(_reset_app)
