@@ -394,6 +394,8 @@ async def agent_chat_stream(req: ChatRequest = Body(...)):
             max_iters = 10
             total_content = ""
             overall_mutated = False
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
             
             for iteration in range(max_iters):
                 # Send iteration start event
@@ -416,6 +418,8 @@ async def agent_chat_stream(req: ChatRequest = Body(...)):
                     elif chunk["type"] == "done":
                         accumulated_message = chunk["message"]
                         usage = chunk.get("usage", {})
+                        total_prompt_tokens += usage.get("prompt_tokens", 0)
+                        total_completion_tokens += usage.get("completion_tokens", 0)
                         yield f"data: {json.dumps({'type': 'llm_done', 'usage': usage})}\n\n"
                 
                 # If no tool calls, we're done
@@ -494,7 +498,13 @@ async def agent_chat_stream(req: ChatRequest = Body(...)):
                 masked = _mask_ng_urls(url)
                 state_link = {"url": url, "masked_markdown": masked}
             
-            yield f"data: {json.dumps({'type': 'final', 'content': total_content, 'mutated': overall_mutated, 'state_link': state_link})}\n\n"
+            usage_summary = {
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_tokens": total_prompt_tokens + total_completion_tokens
+            }
+            
+            yield f"data: {json.dumps({'type': 'final', 'content': total_content, 'mutated': overall_mutated, 'state_link': state_link, 'usage': usage_summary})}\n\n"
             yield f"data: {json.dumps({'type': 'complete'})}\n\n"
             
         except Exception as e:
@@ -554,6 +564,8 @@ def chat(req: ChatRequest):
     aggregated_ng_views = None  # Track ng_views from data_query_polars
     aggregated_query_data = None  # Track full data result from data_query_polars for frontend rendering
     aggregated_plot_data = None  # Track plot result from data_plot for frontend rendering
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
 
     timing.start_agent_loop()
     
@@ -568,10 +580,14 @@ def chat(req: ChatRequest):
             # Extract token usage if available
             usage = out.get("usage", {})
             if usage:
+                prompt_toks = usage.get("prompt_tokens", 0)
+                completion_toks = usage.get("completion_tokens", 0)
                 llm_ctx.set_tokens(
-                    prompt=usage.get("prompt_tokens", 0),
-                    completion=usage.get("completion_tokens", 0)
+                    prompt=prompt_toks,
+                    completion=completion_toks
                 )
+                total_prompt_tokens += prompt_toks
+                total_completion_tokens += completion_toks
         
         choices = out.get("choices") or []
         if not choices:
@@ -807,7 +823,11 @@ def chat(req: ChatRequest):
     final_payload = {
         "model": "iterative",
         "choices": [{"index": 0, "message": final_assistant, "finish_reason": "stop"}],
-        "usage": {},
+        "usage": {
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens
+        },
         "mutated": overall_mutated,
         "state_link": state_link_block,
         "tool_trace": tool_execution_records,

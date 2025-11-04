@@ -55,6 +55,37 @@ last_loaded_url: str | None = None
 _trace_history = []
 _full_table_data = {}  # Store full table data for modal: {message_id: full_table_text}
 
+# Agent Activity Status Components
+_session_prompt_tokens = 0
+_session_completion_tokens = 0
+_current_response_prompt_tokens = 0
+_current_response_completion_tokens = 0
+_agent_state = "🟢"  # 🟢 Idle / 🟡 Thinking / 🔵 Working / 🔴 Error
+_current_tool_chain = []
+_status_update_queue = []
+_status_update_task = None
+
+agent_status_line1 = pn.pane.Markdown(
+    "🟢 **Ready**",
+    sizing_mode="stretch_width",
+    styles={"font-size": "14px", "padding": "2px 5px", "margin": "0"}
+)
+agent_status_line2 = pn.pane.Markdown(
+    "This response: 0 tokens | Total: 0 tokens",
+    sizing_mode="stretch_width",
+    styles={"font-size": "12px", "padding": "2px 5px", "margin": "0", "font-family": "monospace"}
+)
+
+agent_status_card = pn.Card(
+    agent_status_line1,
+    agent_status_line2,
+    title="Agent Activity",
+    collapsed=False,
+    sizing_mode="stretch_width",
+    styles={"border": "1px solid #444"},
+    margin=(5, 5, 10, 5)
+)
+
 # Preview card components - separate for Data Upload and Summaries tabs
 
 # Data Upload preview
@@ -186,6 +217,7 @@ def _update_preview(file_id: str = None, summary_id: str = None, is_summary: boo
 # Settings widgets
 auto_load_checkbox = pn.widgets.Checkbox(name="Auto-load view", value=True)
 show_query_tables = pn.widgets.Checkbox(name="Show query tables in plots", value=False)
+show_agent_status = pn.widgets.Checkbox(name="Show Agent Status", value=True)
 latest_url = pn.widgets.TextInput(name="Latest NG URL", value="", disabled=True)
 update_state_interval = pn.widgets.IntInput(name="Update state interval (sec)", value=5, start=1)
 trace_history_checkbox = pn.widgets.Checkbox(name="Trace history", value=True)
@@ -195,6 +227,12 @@ _trace_history: list[dict] = []
 _recent_traces_view = pn.pane.Markdown("No traces yet.", sizing_mode="stretch_width")
 _recent_traces_accordion = pn.Accordion(("Recent Traces", _recent_traces_view), active=[])
 ng_links_internal = pn.widgets.Checkbox(name="NG links open internal", value=True)
+
+# Wire up show agent status callback
+def _toggle_agent_status(event):
+    agent_status_card.visible = event.new
+
+show_agent_status.param.watch(_toggle_agent_status, "value")
 
 # Viewer settings widgets
 viewer_show_scale_bar = pn.widgets.Checkbox(name="Show Scale Bar", value=True)
@@ -365,7 +403,7 @@ async def _notify_backend_state_load(url: str):
             except Exception as sync_err:
                 logger.exception("Failed to sync viewer settings from backend after load")
                 
-        status.object = f"**Opened:** {sync_url}"
+        status.object = "✓ State loaded"
     except Exception as e:
         status.object = f"Error syncing: {e}"
 
@@ -459,6 +497,7 @@ async def agent_call(prompt: str) -> dict:
         tool_trace = data.get("tool_trace") or []
         query_data = data.get("query_data")  # Raw query result from backend
         plot_data = data.get("plot_data")  # Raw plot result from backend
+        usage = data.get("usage", {})  # Extract token usage from backend
         
         return {
             "answer": answer or "(no response)",
@@ -471,6 +510,7 @@ async def agent_call(prompt: str) -> dict:
             "ng_views_raw": ng_views,  # Keep raw ng_views for Tabulator rendering
             "query_data": query_data,  # Pass through query_data for direct rendering
             "plot_data": plot_data,  # Pass through plot_data for direct rendering
+            "usage": usage,  # Pass through token usage for agent status display
         }
 
 
@@ -713,6 +753,112 @@ def _mask_client_side(text: str) -> str:
             return f"[Updated Neuroglancer view]({u})"
         return u
     return url_pattern.sub(repl, text)
+
+
+async def _process_status_updates():
+    """Process queued status updates with delays to make them visible."""
+    global _status_update_queue, _status_update_task
+    
+    while _status_update_queue:
+        update = _status_update_queue.pop(0)
+        
+        # Apply the update
+        state = update.get("state")
+        tools = update.get("tools")
+        prompt_tokens = update.get("prompt_tokens", 0)
+        completion_tokens = update.get("completion_tokens", 0)
+        clear_tokens = update.get("clear_tokens", False)
+        
+        global _agent_state, _current_tool_chain, _current_response_prompt_tokens, _current_response_completion_tokens
+        global _session_prompt_tokens, _session_completion_tokens
+        
+        if clear_tokens:
+            _current_tool_chain = []
+        
+        if state:
+            _agent_state = state
+        
+        if tools is not None:
+            _current_tool_chain = tools
+        
+        # Set current response tokens and add the delta to session totals
+        if prompt_tokens or completion_tokens:
+            # Calculate delta from previous values
+            delta_prompt = prompt_tokens - _current_response_prompt_tokens
+            delta_completion = completion_tokens - _current_response_completion_tokens
+            
+            # Update current response tokens
+            _current_response_prompt_tokens = prompt_tokens
+            _current_response_completion_tokens = completion_tokens
+            
+            # Add only the delta to session totals
+            _session_prompt_tokens += delta_prompt
+            _session_completion_tokens += delta_completion
+        
+        # Update line 1: state + tool chain
+        if _current_tool_chain:
+            tool_str = " → ".join([f"`{t}`" for t in _current_tool_chain[-3:]])  # Show last 3 tools
+            if len(_current_tool_chain) > 3:
+                tool_str = "... → " + tool_str
+            agent_status_line1.object = f"{_agent_state} **Working:** {tool_str}"
+        else:
+            # Show appropriate text based on state
+            if _agent_state == "🟡":
+                agent_status_line1.object = f"{_agent_state} **Thinking...**"
+            elif _agent_state == "🔴":
+                agent_status_line1.object = f"{_agent_state} **Error**"
+            else:
+                agent_status_line1.object = f"{_agent_state} **Ready**"
+        
+        # Update line 2: token counts
+        current_total = _current_response_prompt_tokens + _current_response_completion_tokens
+        session_total = _session_prompt_tokens + _session_completion_tokens
+        agent_status_line2.object = f"This response: {current_total:,} tokens ({_current_response_prompt_tokens:,}+{_current_response_completion_tokens:,}) | Total: {session_total:,} tokens"
+        
+        # Wait 200ms before processing next update
+        await asyncio.sleep(0.4)
+    
+    _status_update_task = None
+
+
+def _update_agent_status(state: str = None, tools: list = None, prompt_tokens: int = 0, completion_tokens: int = 0, reset: bool = False, clear_tokens: bool = False):
+    """Update agent activity status display with queuing and delays.
+    
+    Args:
+        state: Agent state indicator (🟢/🟡/🔵/🔴)
+        tools: List of tool names being executed
+        prompt_tokens: Prompt tokens for current response (will be added to session)
+        completion_tokens: Completion tokens for current response (will be added to session)
+        reset: If True, reset to idle state (deprecated, use clear_tokens instead)
+        clear_tokens: If True, clear tool chain but keep token counts visible
+    """
+    global _status_update_queue, _status_update_task, _agent_state, _current_tool_chain
+    
+    if reset:
+        # Legacy reset - clear everything immediately
+        global _current_response_prompt_tokens, _current_response_completion_tokens
+        _agent_state = "🟢"
+        _current_tool_chain = []
+        agent_status_line1.object = "🟢 **Ready**"
+        # Keep current response tokens visible, don't reset to 0
+        current_total = _current_response_prompt_tokens + _current_response_completion_tokens
+        session_total = _session_prompt_tokens + _session_completion_tokens
+        agent_status_line2.object = f"🎯 Last response: {current_total:,} tokens ({_current_response_prompt_tokens:,}+{_current_response_completion_tokens:,}) | 📊 Total: {session_total:,} tokens"
+        return
+    
+    # Queue the update
+    update = {
+        "state": state,
+        "tools": tools,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "clear_tokens": clear_tokens
+    }
+    _status_update_queue.append(update)
+    
+    # Start processing task if not already running
+    if _status_update_task is None or _status_update_task.done():
+        _status_update_task = asyncio.create_task(_process_status_updates())
 
 
 def _load_internal_link(url: str):
@@ -1000,7 +1146,12 @@ async def respond_streaming(contents: str, user: str, **kwargs):
     Yields:
         Chat message content (text, markdown, or Panel components)
     """
-    global last_loaded_url
+    global last_loaded_url, _current_response_prompt_tokens, _current_response_completion_tokens
+    
+    # Start new response - reset current response token counters
+    _current_response_prompt_tokens = 0
+    _current_response_completion_tokens = 0
+    _update_agent_status(state="🟡", tools=[])
     
     try:
         accumulated_message = ""
@@ -1009,6 +1160,7 @@ async def respond_streaming(contents: str, user: str, **kwargs):
         state_link = None
         has_yielded = False
         event_count = 0
+        response_usage = {}
         
         async with httpx.AsyncClient(timeout=120) as client:
             chat_payload = {"messages": [{"role": "user", "content": contents}]}
@@ -1051,10 +1203,12 @@ async def respond_streaming(contents: str, user: str, **kwargs):
                             if tool:
                                 tool_names.append(tool)
                                 status.object = f"Tools: {' → '.join(tool_names)}"
+                                _update_agent_status(state="🔵", tools=tool_names)
                         
                         elif event_type == "final":
                             mutated = event.get("mutated", False)
                             state_link = event.get("state_link")
+                            response_usage = event.get("usage", {})
                             # Use content from final event if we haven't streamed any
                             final_content = event.get("content", "")
                             if not has_yielded and final_content:
@@ -1065,6 +1219,7 @@ async def respond_streaming(contents: str, user: str, **kwargs):
                         elif event_type == "error":
                             error_msg = event.get("error", "Unknown error")
                             logger.error(f"Stream error: {error_msg}")
+                            _update_agent_status(state="🔴", tools=tool_names)
                             yield f"Error: {error_msg}"
                             has_yielded = True
                             break
@@ -1072,14 +1227,28 @@ async def respond_streaming(contents: str, user: str, **kwargs):
                         elif event_type == "complete":
                             break
         
+        # Update token counts
+        if response_usage:
+            _update_agent_status(
+                prompt_tokens=response_usage.get("prompt_tokens", 0),
+                completion_tokens=response_usage.get("completion_tokens", 0)
+            )
+        
         # Handle state link auto-load
         link_url, status_msg = _handle_state_link_auto_load(mutated, state_link)
         if status_msg:
-            status.object = status_msg
+            # Abbreviate Neuroglancer URLs in status
+            if "Opened:" in status_msg and "neuroglancer" in status_msg.lower():
+                status.object = "🔗 View updated"
+            else:
+                status.object = status_msg
         elif tool_names:
             status.object = f"Tools: {' → '.join(tool_names)}"
         else:
-            status.object = "Done (no view change)."
+            status.object = "✓ Ready"
+        
+        # Clear tool chain but keep tokens visible
+        _update_agent_status(state="🟢", clear_tokens=True)
         
         # Only yield at the end if we haven't yielded anything yet
         if not has_yielded:
@@ -1113,7 +1282,12 @@ async def respond_non_streaming(contents: str, user: str, **kwargs):
     Yields:
         Chat message content (text, markdown, or Panel components)
     """
-    global last_loaded_url
+    global last_loaded_url, _current_response_prompt_tokens, _current_response_completion_tokens
+    
+    # Start new response - reset current response token counters
+    _current_response_prompt_tokens = 0
+    _current_response_completion_tokens = 0
+    _update_agent_status(state="🟡", tools=[])
     
     try:
         result = await agent_call(contents)
@@ -1125,12 +1299,28 @@ async def respond_non_streaming(contents: str, user: str, **kwargs):
         plot_data = result.get("plot_data")
         trace = result.get("tool_trace") or []
         vt = result.get("views_table")
+        usage = result.get("usage", {})
         
-        # Update status with tool names
+        # Update status with tool names and agent activity
+        tool_names = []
         if trace:
             tool_names = [t.get("tool") or t.get("name") for t in trace if t]
             if tool_names:
                 status.object = f"Tools: {' → '.join(tool_names)}"
+        
+        # Update agent status with tools and tokens together
+        if usage:
+            prompt_toks = usage.get("prompt_tokens", 0)
+            completion_toks = usage.get("completion_tokens", 0)
+            logger.debug(f"Updating agent status with tokens: prompt={prompt_toks}, completion={completion_toks}")
+            _update_agent_status(
+                state="🔵" if tool_names else "🟡",
+                tools=tool_names,
+                prompt_tokens=prompt_toks,
+                completion_tokens=completion_toks
+            )
+        else:
+            logger.debug("No usage data received from backend")
         
         # Update trace history
         await _update_trace_history()
@@ -1329,10 +1519,14 @@ async def respond_non_streaming(contents: str, user: str, **kwargs):
                 )
             else:
                 yield safe_answer if safe_answer else "(no response)"
+        
+        # Clear tool chain but keep tokens visible
+        _update_agent_status(state="🟢", clear_tokens=True)
     
     except Exception as e:
         logger.exception("Chat error")
         status.object = f"Error: {e}"
+        _update_agent_status(state="🔴", tools=[])
         yield f"Error: {e}"
 
 
@@ -1407,6 +1601,7 @@ settings_card = pn.Card(
         pn.pane.Markdown("**System Controls**"),
         auto_load_checkbox,
         show_query_tables,
+        show_agent_status,
         latest_url,
         open_latest_btn,
         ng_links_internal,
@@ -1910,7 +2105,7 @@ workspace_card = pn.Card(
 
 app = pn.template.FastListTemplate(
     title=f"Neuroglanger Chat v{version}",
-    sidebar=[chat], #views_table (dont need below)
+    sidebar=[agent_status_card, chat], #views_table (dont need below)
     right_sidebar=[reset_app_btn, viewer_settings_card, settings_card],
     collapsed_right_sidebar = True,
     main=[workspace_card, viewer],
