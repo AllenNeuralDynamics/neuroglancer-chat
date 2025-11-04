@@ -195,6 +195,35 @@ _trace_history: list[dict] = []
 _recent_traces_view = pn.pane.Markdown("No traces yet.", sizing_mode="stretch_width")
 _recent_traces_accordion = pn.Accordion(("Recent Traces", _recent_traces_view), active=[])
 ng_links_internal = pn.widgets.Checkbox(name="NG links open internal", value=True)
+
+# Viewer settings widgets
+viewer_show_scale_bar = pn.widgets.Checkbox(name="Show Scale Bar", value=True)
+viewer_show_annotations = pn.widgets.Checkbox(name="Show Default Annotations", value=False)
+viewer_show_axis_lines = pn.widgets.Checkbox(name="Show Axis Lines", value=False)
+viewer_layout = pn.widgets.Select(
+    name="Layout",
+    options=["xy", "xz", "yz", "3d", "4panel"],
+    value="xy"
+)
+
+# Wire up viewer settings callbacks
+viewer_show_scale_bar.param.watch(
+    lambda event: asyncio.create_task(_update_viewer_setting("showScaleBar", event.new)),
+    "value"
+)
+viewer_show_annotations.param.watch(
+    lambda event: asyncio.create_task(_update_viewer_setting("showDefaultAnnotations", event.new)),
+    "value"
+)
+viewer_show_axis_lines.param.watch(
+    lambda event: asyncio.create_task(_update_viewer_setting("showAxisLines", event.new)),
+    "value"
+)
+viewer_layout.param.watch(
+    lambda event: asyncio.create_task(_update_viewer_setting("layout", event.new)),
+    "value"
+)
+
 views_table = pn.widgets.Tabulator(pd.DataFrame(), disabled=True, height=250, visible=False)
 # NOTE: Tabulator expects a pandas.DataFrame. Do NOT pass a polars DataFrame or a class placeholder.
 # Always convert upstream objects (lists of dicts, polars.DataFrame) to pandas before assignment.
@@ -254,10 +283,22 @@ def _reset_app(_):
 reset_app_btn = pn.widgets.Button(name="🔄 Reset App", button_type="danger", width=150)
 reset_app_btn.on_click(_reset_app)
 
+async def _update_viewer_setting(setting_name: str, value):
+    """Sync a viewer setting change to the backend."""
+    try:
+        payload = {setting_name: value}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{BACKEND}/tools/ng_set_viewer_settings", json=payload)
+            if resp.status_code != 200:
+                logger.error(f"Failed to update viewer setting {setting_name}: {resp.text}")
+    except Exception as e:
+        logger.exception(f"Failed to update viewer setting {setting_name}")
+
 async def _notify_backend_state_load(url: str):
     """Inform backend that the widget loaded a new NG URL so CURRENT_STATE is in sync.
     
     If URL contains a JSON pointer, expand it first before syncing to backend.
+    Passes user's preferred defaults from settings panel to backend.
     """
     try:
         status.object = "Syncing state to backend…"
@@ -276,12 +317,54 @@ async def _notify_backend_state_load(url: str):
                 # Fall back to syncing original URL
                 sync_url = url
         
+        # Gather user's preferred defaults from settings panel
+        default_settings = {
+            "showScaleBar": viewer_show_scale_bar.value,
+            "showDefaultAnnotations": viewer_show_annotations.value,
+            "showAxisLines": viewer_show_axis_lines.value,
+            "layout": viewer_layout.value
+        }
+        
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(f"{BACKEND}/tools/state_load", json={"link": sync_url})
+            resp = await client.post(
+                f"{BACKEND}/tools/state_load",
+                json={"link": sync_url, "default_settings": default_settings}
+            )
             data = resp.json()
             if not data.get("ok"):
                 status.object = f"Error syncing link: {data.get('error', 'unknown error')}"
                 return
+            
+            # If backend applied defaults, it returns an updated_url - reload viewer with it
+            updated_url = data.get("updated_url")
+            if updated_url and updated_url != sync_url:
+                logger.debug(f"Backend applied user's preferred defaults, reloading viewer with updated URL")
+                with _programmatic_viewer_update():
+                    viewer.url = updated_url
+                    viewer._load_url()
+            
+            # After successful load, fetch viewer settings and update widgets
+            # (This handles case where loaded URL already had some settings)
+            try:
+                summary_resp = await client.post(
+                    f"{BACKEND}/tools/ng_state_summary",
+                    json={"detail": "standard"}
+                )
+                if summary_resp.status_code == 200:
+                    summary_data = summary_resp.json()
+                    flags = summary_data.get("flags", {})
+                    layout = summary_data.get("layout", "xy")
+                    
+                    # Update widgets to match loaded state
+                    # (overrides user defaults if URL already had specific settings)
+                    viewer_show_scale_bar.value = flags.get("showScaleBar", True)
+                    viewer_show_annotations.value = flags.get("showDefaultAnnotations", False)
+                    viewer_show_axis_lines.value = flags.get("showAxisLines", False)
+                    viewer_layout.value = layout
+                    logger.debug(f"Synced viewer settings from loaded state: {flags}")
+            except Exception as sync_err:
+                logger.exception("Failed to sync viewer settings from backend after load")
+                
         status.object = f"**Opened:** {sync_url}"
     except Exception as e:
         status.object = f"Error syncing: {e}"
@@ -1307,11 +1390,21 @@ chat = ChatInterface(
 )
 
 # ---------------- Settings UI ----------------
+viewer_settings_card = pn.Card(
+    pn.Column(
+        pn.pane.Markdown("**Viewer Display**"),
+        viewer_show_scale_bar,
+        viewer_show_annotations,
+        viewer_show_axis_lines,
+        viewer_layout,
+    ),
+    title="Viewer Settings",
+    collapsed=False,
+)
+
 settings_card = pn.Card(
     pn.Column(
         pn.pane.Markdown("**System Controls**"),
-        reset_app_btn,
-        pn.pane.Markdown("---"),  # Visual separator
         auto_load_checkbox,
         show_query_tables,
         latest_url,
@@ -1324,7 +1417,7 @@ settings_card = pn.Card(
         _recent_traces_accordion,
         status,
     ),
-    title="Settings",
+    title="System Settings",
     collapsed=False,
 )
 
@@ -1818,7 +1911,7 @@ workspace_card = pn.Card(
 app = pn.template.FastListTemplate(
     title=f"Neuroglanger Chat v{version}",
     sidebar=[chat], #views_table (dont need below)
-    right_sidebar=settings_card,
+    right_sidebar=[reset_app_btn, viewer_settings_card, settings_card],
     collapsed_right_sidebar = True,
     main=[workspace_card, viewer],
     sidebar_width=500,

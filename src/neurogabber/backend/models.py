@@ -59,6 +59,7 @@ class SetLayerVisibility(BaseModel):
 
 class StateLoad(BaseModel):
     link: str
+    default_settings: Optional[dict] = None  # User's preferred defaults from settings panel
 
 
 class StateSummary(BaseModel):
@@ -131,6 +132,13 @@ class NgAnnotationsFromData(BaseModel):
     color: Optional[str] = None  # Hex color like '#00ff00' for green
     filter_expression: Optional[str] = None  # Optional Polars filter before creating annotations
     limit: int = 1000  # Max annotations to create
+
+
+class NgSetViewerSettings(BaseModel):
+    showScaleBar: Optional[bool] = None
+    showDefaultAnnotations: Optional[bool] = None
+    showAxisLines: Optional[bool] = None
+    layout: Optional[Literal["xy", "xz", "yz", "3d", "4panel"]] = None
 
 
 # Chat

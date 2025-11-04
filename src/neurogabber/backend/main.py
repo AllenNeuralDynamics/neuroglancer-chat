@@ -10,7 +10,7 @@ from fastapi import FastAPI, UploadFile, Body, Query, File
 from fastapi.responses import StreamingResponse
 from .models import (
     ChatRequest, SetView, SetLUT, AddAnnotations, HistogramReq, IngestCSV, SaveState,
-    AddLayer, SetLayerVisibility, StateLoad, StateSummary,
+    AddLayer, SetLayerVisibility, NgSetViewerSettings, StateLoad, StateSummary,
     DataInfo, DataPreview, DataDescribe, DataQuery, DataPlot, NgViewsTable, NgAnnotationsFromData
 )
 from .tools.neuroglancer_state import (
@@ -186,6 +186,21 @@ def t_set_layer_visibility(args: SetLayerVisibility):
     CURRENT_STATE.set_layer_visibility(name=args.name, visible=args.visible)
     return {"ok": True, "layer": args.name, "visible": args.visible}
 
+@app.post("/tools/ng_set_viewer_settings")
+def t_set_viewer_settings(args: NgSetViewerSettings):
+    """Set top-level viewer display settings.
+    
+    Updates viewer-wide display options like scale bar, axis lines, annotations, and layout.
+    """
+    global CURRENT_STATE
+    CURRENT_STATE.set_viewer_settings(
+        showScaleBar=args.showScaleBar,
+        showDefaultAnnotations=args.showDefaultAnnotations,
+        showAxisLines=args.showAxisLines,
+        layout=args.layout
+    )
+    return {"ok": True}
+
 @app.post("/tools/ng_annotations_add")
 def t_add_annotations(args: AddAnnotations):
     global CURRENT_STATE
@@ -252,7 +267,33 @@ def t_state_load(args: StateLoad):
     global CURRENT_STATE
     try:
         CURRENT_STATE = NeuroglancerState.from_url(args.link)
-        return {"ok": True}
+        
+        # Apply user's preferred defaults if not present in loaded state
+        defaults_applied = False
+        
+        # Use provided defaults from settings panel or fall back to system defaults
+        if args.default_settings:
+            defaults = args.default_settings
+        else:
+            # Fallback system defaults if frontend doesn't provide them
+            defaults = {
+                "showScaleBar": True,
+                "showDefaultAnnotations": False,
+                "showAxisLines": False,
+                "layout": "xy"
+            }
+        
+        for key, default_val in defaults.items():
+            if key not in CURRENT_STATE.data:
+                CURRENT_STATE.data[key] = default_val
+                defaults_applied = True
+        
+        # Return updated URL if defaults were applied
+        result = {"ok": True}
+        if defaults_applied:
+            result["updated_url"] = CURRENT_STATE.to_url()
+        
+        return result
     except Exception as e:
         logger.exception("Failed to load state from link")
         return {"ok": False, "error": str(e)}
@@ -888,6 +929,9 @@ def _execute_tool_by_name(name: str, args: dict):
         if name == "ng_set_layer_visibility":
             from .models import SetLayerVisibility
             return t_set_layer_visibility(SetLayerVisibility(**args))
+        if name == "ng_set_viewer_settings":
+            from .models import NgSetViewerSettings
+            return t_set_viewer_settings(NgSetViewerSettings(**args))
         if name == "ng_annotations_add":
             from .models import AddAnnotations
             return t_add_annotations(AddAnnotations(**args))
@@ -1083,6 +1127,7 @@ def summarize_state_struct(state, detail: str = "standard") -> dict:
         "flags": {
             "showAxisLines": sd.get("showAxisLines"),
             "showScaleBar": sd.get("showScaleBar"),
+            "showDefaultAnnotations": sd.get("showDefaultAnnotations"),
         },
         "version": 1,
         "detail": detail,

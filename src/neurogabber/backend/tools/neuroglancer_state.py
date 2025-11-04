@@ -132,6 +132,26 @@ class NeuroglancerState:
         ann.setdefault("annotations", []).extend(items)
         return self
 
+    def set_viewer_settings(self, showScaleBar=None, showDefaultAnnotations=None, 
+                          showAxisLines=None, layout=None):
+        """Update top-level viewer settings.
+        
+        These settings control viewer-wide display options:
+        - showScaleBar: Display scale bar overlay
+        - showDefaultAnnotations: Show built-in annotations
+        - showAxisLines: Display axis lines in viewer
+        - layout: Viewer layout mode (xy, xz, yz, 3d, 4panel)
+        """
+        if showScaleBar is not None:
+            self.data["showScaleBar"] = showScaleBar
+        if showDefaultAnnotations is not None:
+            self.data["showDefaultAnnotations"] = showDefaultAnnotations
+        if showAxisLines is not None:
+            self.data["showAxisLines"] = showAxisLines
+        if layout is not None:
+            self.data["layout"] = layout
+        return self
+
     # --- Serialization helpers -------------------------------------------------
     def to_url(self) -> str:
         return to_url(self.data)

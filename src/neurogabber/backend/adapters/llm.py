@@ -257,6 +257,22 @@ TOOLS = [
     }
   },
   {
+    "type": "function",
+    "function": {
+      "name": "ng_set_viewer_settings",
+      "description": "Set viewer-level display settings (scale bar, axis lines, default annotations, layout mode). All parameters optional - only specified settings will be updated.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "showScaleBar": {"type": "boolean", "description": "Show/hide scale bar overlay"},
+          "showDefaultAnnotations": {"type": "boolean", "description": "Show/hide default annotations"},
+          "showAxisLines": {"type": "boolean", "description": "Show/hide axis lines in viewer"},
+          "layout": {"type": "string", "enum": ["xy", "xz", "yz", "3d", "4panel"], "description": "Viewer layout mode"}
+        }
+      }
+    }
+  },
+  {
     "type":"function",
     "function": {
       "name":"ng_set_lut",
