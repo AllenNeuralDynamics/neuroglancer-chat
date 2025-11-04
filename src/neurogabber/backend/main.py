@@ -29,18 +29,36 @@ import polars as pl
 
 import logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Enable verbose debug logging when NEUROGABBER_DEBUG is set (1/true/yes)
 DEBUG_ENABLED = os.getenv("NEUROGABBER_DEBUG", "").lower() in ("1", "true", "yes")
 
+# Configure logging level based on debug flag
+log_level = logging.DEBUG if DEBUG_ENABLED else logging.INFO
+logging.basicConfig(
+    level=log_level,
+    format="%(levelname)s: %(asctime)s | %(name)s | %(message)s",
+    force=True  # Force reconfiguration even if uvicorn already configured logging
+)
+
+# Also configure the root logger and uvicorn's loggers explicitly
+# Uvicorn configures logging after module import, so we need to be aggressive
+if DEBUG_ENABLED:
+    # Set root logger to DEBUG
+    logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Configure uvicorn and our backend loggers
+    for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error", "backend.main", __name__]:
+        logging.getLogger(logger_name).setLevel(logging.DEBUG)
+    
+    # Silence noisy third-party libraries - keep them at INFO even in debug mode
+    for noisy_logger in ["openai", "httpx", "httpcore", "python_multipart.multipart"]:
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+
 def _dbg(msg: str):  # lightweight wrapper to centralize debug guard
-    if DEBUG_ENABLED:
-        try:
-            logger.info(f"[DBG] {msg}")
-        except Exception:
-            pass
+    """Debug logging wrapper - now uses proper logger.debug()"""
+    logger.debug(msg)
 
 app = FastAPI()
 
@@ -315,6 +333,8 @@ def _data_context_block(max_files: int = 10, max_summaries: int = 10) -> str:
 @app.post("/agent/chat/stream")
 async def agent_chat_stream(req: ChatRequest = Body(...)):
     """Stream agent chat responses using Server-Sent Events."""
+    _dbg("📨 /agent/chat/stream endpoint called")
+    
     import json
     import asyncio
     
@@ -452,6 +472,8 @@ def chat(req: ChatRequest):
     Returns the final model response (with intermediate tool messages NOT included
     to keep client payload small) plus optional `state_link` if a mutating tool ran.
     """
+    _dbg("📨 /agent/chat endpoint called")
+    
     # Initialize timing collector
     user_prompt = next((m.content for m in req.messages if m.role == "user"), "")
     timing = TimingCollector(user_prompt=user_prompt or "")
@@ -615,7 +637,9 @@ def chat(req: ChatRequest):
                         }
                         _dbg(f"📦 Sending minimal acknowledgment to LLM (SEND_DATA_TO_LLM=False)")
                 else:
+                    error_msg = result_payload.get('error', 'Unknown error')
                     _dbg(f"❌ data_plot result not captured - ok={result_payload.get('ok')}, keys={list(result_payload.keys())}")
+                    _dbg(f"❌ data_plot error message: {error_msg}")
             
             if fn == "data_ng_views_table" and isinstance(result_payload, dict):
                 if "error" in result_payload and "rows" not in result_payload:
@@ -761,6 +785,21 @@ def chat(req: ChatRequest):
     return final_payload
 
 
+@app.get("/debug/test-logging")
+def debug_test_logging():
+    """Test endpoint to verify debug logging is working."""
+    logger.debug("🧪 DEBUG log from test endpoint")
+    logger.info("🧪 INFO log from test endpoint")
+    logger.warning("🧪 WARNING log from test endpoint")
+    _dbg("🧪 _dbg() call from test endpoint")
+    return {
+        "debug_enabled": DEBUG_ENABLED,
+        "log_level": logging.getLevelName(logger.level),
+        "root_level": logging.getLevelName(logging.getLogger().level),
+        "message": "Check your console for log messages"
+    }
+
+
 @app.get("/debug/tool_trace")
 def debug_tool_trace(n: int = 1):
     """Return the last n full tool traces (untruncated)."""
@@ -787,6 +826,24 @@ def debug_timing(n: Optional[int] = None):
         "stats": stats,
         "records": records,
         "count": len(records)
+    }
+
+
+@app.get("/debug/logging-check")
+def debug_logging_check():
+    """Simple endpoint to test if debug logs appear in console."""
+    print("🔥 PRINT: debug_logging_check endpoint was called!")
+    logger.debug("🧪 DEBUG: This is a debug-level log")
+    logger.info("🧪 INFO: This is an info-level log")
+    logger.warning("🧪 WARNING: This is a warning-level log")
+    _dbg("🧪 _DBG: This is a _dbg() call")
+    
+    return {
+        "status": "ok",
+        "debug_enabled": DEBUG_ENABLED,
+        "logger_level": logging.getLevelName(logger.level),
+        "root_logger_level": logging.getLevelName(logging.getLogger().level),
+        "message": "Check your backend console for 5 log messages (1 print + 4 logs)"
     }
 
 

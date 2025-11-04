@@ -15,11 +15,18 @@ from neurogabber.backend.tools.pointer_expansion import (
 
 # setup debug logging
 
+# Enable verbose debug logging when NEUROGABBER_DEBUG is set (1/true/yes)
+DEBUG_ENABLED = os.getenv("NEUROGABBER_DEBUG", "").lower() in ("1", "true", "yes")
+
 FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-def reconfig_basic_config(format_=FORMAT, level=logging.INFO):
+def reconfig_basic_config(format_=FORMAT, level=None):
     """(Re-)configure logging"""
+    if level is None:
+        level = logging.DEBUG if DEBUG_ENABLED else logging.INFO
     logging.basicConfig(format=format_, level=level, force=True)
-    logging.info("Logging.basicConfig completed successfully")
+    logging.info(f"Logging configured at {logging.getLevelName(level)} level")
+    if DEBUG_ENABLED:
+        logging.warning("🔍 FRONTEND DEBUG MODE ENABLED (NEUROGABBER_DEBUG=1)")
 
 reconfig_basic_config()
 logger = logging.getLogger(name="app")
@@ -633,519 +640,641 @@ def _load_internal_link(url: str):
         viewer._load_url()
     # Sync handled by _on_url_change in programmatic context
 
-async def respond(contents: str, user: str, **kwargs):
-    """Async generator that streams agent responses token by token."""
-    global last_loaded_url, _trace_history
-    status.object = "Running…"
+# ============================================================================
+# Common Utilities for Chat Handlers
+# ============================================================================
+
+def _handle_state_link_auto_load(mutated: bool, state_link: dict, link: str = None):
+    """Handle auto-loading of Neuroglancer state links.
     
-    if USE_STREAMING:
-        # Streaming path
-        try:
-            accumulated_message = ""
-            tool_names = []
-            mutated = False
-            state_link = None
-            has_yielded = False
-            event_count = 0
+    Args:
+        mutated: Whether a mutating tool was executed
+        state_link: Dict with 'url' and 'masked' keys from backend
+        link: Optional direct link (fallback if state_link is None)
+    
+    Returns:
+        Tuple of (link_url, status_message)
+    """
+    global last_loaded_url
+    
+    if not mutated:
+        return None, None
+    
+    link_url = (state_link or {}).get("url") or link
+    if not link_url:
+        return None, None
+    
+    latest_url.value = link_url
+    
+    if link_url != last_loaded_url and auto_load_checkbox.value:
+        with _programmatic_viewer_update():
+            viewer.url = link_url
+            viewer._load_url()
+        last_loaded_url = link_url
+        return link_url, f"**Opened:** {link_url}"
+    else:
+        return link_url, "New link generated (auto-load off)."
+
+
+async def _update_trace_history():
+    """Fetch and update trace history display if enabled."""
+    if not trace_history_checkbox.value:
+        return
+    
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            hist_resp = await client.get(f"{BACKEND}/debug/tool_trace", params={"n": trace_history_length.value})
+        hist_data = hist_resp.json()
+        global _trace_history
+        _trace_history = hist_data.get("traces", [])
+        
+        if _trace_history:
+            def _payload():
+                payload = {
+                    "exported_at": datetime.utcnow().isoformat() + 'Z',
+                    "count": len(_trace_history),
+                    "traces": _trace_history,
+                }
+                return io.BytesIO(json.dumps(payload, indent=2).encode('utf-8'))
             
-            async with httpx.AsyncClient(timeout=120) as client:
-                chat_payload = {"messages": [{"role": "user", "content": contents}]}
-                
-                async with client.stream(
-                    "POST",
-                    f"{BACKEND}/agent/chat/stream",
-                    json=chat_payload
-                ) as response:
-                    # Buffer for accumulating text
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
+            trace_download.callback = _payload
+            ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            trace_download.filename = f"trace_history_{ts}.json"
+            trace_download.disabled = False
+            
+            # Update recent traces markdown (summaries only)
+            lines: list[str] = []
+            for i, t in enumerate(reversed(_trace_history), start=1):
+                steps = t.get("steps", [])
+                tool_chain = " → ".join(s.get("tool") for s in steps if s.get("tool"))
+                mutated_flag = "✅" if t.get("mutated") else "–"
+                final_msg = (t.get("final_message", {}).get("content") or "").strip()
+                final_msg = final_msg[:120] + ("…" if len(final_msg) > 120 else "")
+                lines.append(f"**{i}.** {mutated_flag} {tool_chain or '(no tools)'}\n> {final_msg}")
+            
+            if lines:
+                _recent_traces_view.object = "\n\n".join(lines)
+                _recent_traces_accordion.active = [0]
+            else:
+                _recent_traces_view.object = "No traces yet."
+    except Exception as e:
+        logger.exception("Trace history update failed")
+        status.object += f" | Trace err: {e}"
+
+
+def _create_workspace_button_for_query(query_data: dict):
+    """Create workspace button for query results with closure.
+    
+    Args:
+        query_data: Query data dict from backend
+    
+    Returns:
+        Panel Button widget
+    """
+    workspace_button = pn.widgets.Button(
+        name="📊 Add to Workspace",
+        button_type="primary",
+        sizing_mode="fixed",
+        width=150,
+        margin=(5, 0)
+    )
+    
+    captured_data = query_data
+    
+    def add_to_workspace(event):
+        _add_result_to_workspace_from_data(captured_data)
+        workspace_button.name = "✓ Added to Workspace"
+        workspace_button.button_type = "success"
+        workspace_button.disabled = True
+    
+    workspace_button.on_click(add_to_workspace)
+    return workspace_button
+
+
+def _create_workspace_button_for_plot(plot_pane, plot_type: str, x: str, y: str):
+    """Create workspace button for plot results with closure.
+    
+    Args:
+        plot_pane: The plot pane to add
+        plot_type: Type of plot (scatter, line, bar, heatmap)
+        x: X-axis column name
+        y: Y-axis column name
+    
+    Returns:
+        Panel Button widget
+    """
+    workspace_button = pn.widgets.Button(
+        name="📊 Add Plot to Workspace",
+        button_type="primary",
+        sizing_mode="fixed",
+        width=180,
+        margin=(5, 0)
+    )
+    
+    plot_summary = f"{x} vs {y}" if x and y else None
+    
+    def add_plot_to_workspace(event):
+        _add_plot_to_workspace(plot_pane, plot_type, plot_summary)
+        workspace_button.name = "✓ Added to Workspace"
+        workspace_button.button_type = "success"
+        workspace_button.disabled = True
+    
+    workspace_button.on_click(add_plot_to_workspace)
+    return workspace_button
+
+
+def _create_workspace_button_for_table(table_text: str, ng_views_data: list):
+    """Create workspace button for markdown table with closure.
+    
+    Args:
+        table_text: Markdown table text
+        ng_views_data: List of ng_views for interactive buttons
+    
+    Returns:
+        Panel Button widget
+    """
+    workspace_button = pn.widgets.Button(
+        name="📊 Add to Workspace",
+        button_type="primary",
+        sizing_mode="fixed",
+        width=200,
+        margin=(5, 0)
+    )
+    
+    captured_table = table_text
+    captured_ng_views = ng_views_data
+    
+    def add_to_workspace(event):
+        _add_result_to_workspace(captured_table, captured_ng_views)
+        workspace_button.name = "✓ Added to Workspace"
+        workspace_button.button_type = "success"
+        workspace_button.disabled = True
+    
+    workspace_button.on_click(add_to_workspace)
+    return workspace_button
+
+
+def _build_query_result_components(safe_answer: str, expression: str, tabulator_widget, workspace_button):
+    """Build components for query result display.
+    
+    Args:
+        safe_answer: Masked LLM response text
+        expression: Polars expression code
+        tabulator_widget: The table widget (or None)
+        workspace_button: Workspace button widget
+    
+    Returns:
+        List of Panel components
+    """
+    components = []
+    
+    # Add LLM context if present (strip out code blocks since expression is shown separately)
+    if safe_answer and safe_answer.strip():
+        llm_text = safe_answer.strip()
+        
+        # Remove code blocks (expression is rendered separately by frontend)
+        import re
+        llm_text = re.sub(r'```[a-z]*\n.*?\n```', '', llm_text, flags=re.DOTALL)
+        llm_text = llm_text.strip()
+        
+        # Filter out if it looks like the LLM is listing data rows
+        if llm_text:
+            line_count = llm_text.count("\n")
+            colon_count = llm_text.count(":")
+            if not (line_count > 5 and colon_count > line_count):
+                components.append(pn.pane.Markdown(llm_text, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
+    
+    # Add expression display
+    if expression:
+        expression_display = pn.pane.Markdown(
+            f"```python\n{expression}\n```",
+            sizing_mode="stretch_width",
+            margin=(5, 5, 10, 5)
+        )
+        components.append(expression_display)
+    
+    # Add table and button (only if table was created)
+    if tabulator_widget is not None:
+        components.append(tabulator_widget)
+    components.append(workspace_button)
+    
+    return components
+
+
+def _build_plot_result_components(safe_answer: str, expression: str, plot_pane, plot_info: str, workspace_button):
+    """Build components for plot result display.
+    
+    Args:
+        safe_answer: Masked LLM response text
+        expression: Polars expression code
+        plot_pane: The plot pane widget
+        plot_info: Plot metadata string
+        workspace_button: Workspace button widget
+    
+    Returns:
+        List of Panel components
+    """
+    components = []
+    
+    # Add LLM context if present
+    if safe_answer and safe_answer.strip():
+        llm_text = safe_answer.strip()
+        import re
+        llm_text = re.sub(r'```[a-z]*\n.*?\n```', '', llm_text, flags=re.DOTALL)
+        llm_text = llm_text.strip()
+        if llm_text:
+            components.append(pn.pane.Markdown(llm_text, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
+    
+    # Add expression if present
+    if expression:
+        expression_display = pn.pane.Markdown(
+            f"**Data transformation:**\n```python\n{expression}\n```",
+            sizing_mode="stretch_width",
+            margin=(5, 5, 10, 5)
+        )
+        components.append(expression_display)
+    
+    # Add plot info and plot
+    components.append(pn.pane.Markdown(plot_info, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
+    components.append(plot_pane)
+    components.append(workspace_button)
+    
+    return components
+
+
+# ============================================================================
+# Streaming Chat Handler
+# ============================================================================
+
+async def respond_streaming(contents: str, user: str, **kwargs):
+    """Handle streaming chat with Server-Sent Events.
+    
+    Args:
+        contents: User message text
+        user: User identifier
+        **kwargs: Additional chat parameters
+    
+    Yields:
+        Chat message content (text, markdown, or Panel components)
+    """
+    global last_loaded_url
+    
+    try:
+        accumulated_message = ""
+        tool_names = []
+        mutated = False
+        state_link = None
+        has_yielded = False
+        event_count = 0
+        
+        async with httpx.AsyncClient(timeout=120) as client:
+            chat_payload = {"messages": [{"role": "user", "content": contents}]}
+            
+            async with client.stream(
+                "POST",
+                f"{BACKEND}/agent/chat/stream",
+                json=chat_payload
+            ) as response:
+                # Buffer for accumulating text
+                buffer = ""
+                async for chunk in response.aiter_text():
+                    buffer += chunk
+                    
+                    # Split on double newlines (SSE event separator)
+                    while "\n\n" in buffer:
+                        event_text, buffer = buffer.split("\n\n", 1)
                         
-                        # Split on double newlines (SSE event separator)
-                        while "\n\n" in buffer:
-                            event_text, buffer = buffer.split("\n\n", 1)
-                            
-                            # Each event should start with "data: "
-                            if not event_text.startswith("data: "):
-                                continue
-                            
-                            data_str = event_text[6:]  # Remove "data: " prefix
-                            try:
-                                event = json.loads(data_str)
-                                event_count += 1
-                                event_type = event.get("type")
-                            except json.JSONDecodeError:
-                                logger.warning(f"Failed to parse SSE event")
-                                continue
-                            
-                            # Process the event
-                            if event_type == "content":
-                                accumulated_message += event.get("delta", "")
+                        # Each event should start with "data: "
+                        if not event_text.startswith("data: "):
+                            continue
+                        
+                        data_str = event_text[6:]  # Remove "data: " prefix
+                        try:
+                            event = json.loads(data_str)
+                            event_count += 1
+                            event_type = event.get("type")
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse SSE event")
+                            continue
+                        
+                        # Process the event
+                        if event_type == "content":
+                            accumulated_message += event.get("delta", "")
+                            yield _mask_client_side(accumulated_message)
+                            has_yielded = True
+                        
+                        elif event_type == "tool_start":
+                            tool = event.get("tool")
+                            if tool:
+                                tool_names.append(tool)
+                                status.object = f"Tools: {' → '.join(tool_names)}"
+                        
+                        elif event_type == "final":
+                            mutated = event.get("mutated", False)
+                            state_link = event.get("state_link")
+                            # Use content from final event if we haven't streamed any
+                            final_content = event.get("content", "")
+                            if not has_yielded and final_content:
+                                accumulated_message = final_content
                                 yield _mask_client_side(accumulated_message)
                                 has_yielded = True
-                            
-                            elif event_type == "tool_start":
-                                tool = event.get("tool")
-                                if tool:
-                                    tool_names.append(tool)
-                                    status.object = f"Tools: {' → '.join(tool_names)}"
-                            
-                            elif event_type == "final":
-                                mutated = event.get("mutated", False)
-                                state_link = event.get("state_link")
-                                # Use content from final event if we haven't streamed any
-                                final_content = event.get("content", "")
-                                if not has_yielded and final_content:
-                                    accumulated_message = final_content
-                                    yield _mask_client_side(accumulated_message)
-                                    has_yielded = True
-                            
-                            elif event_type == "error":
-                                error_msg = event.get("error", "Unknown error")
-                                logger.error(f"Stream error: {error_msg}")
-                                yield f"Error: {error_msg}"
-                                has_yielded = True
-                                break
-                            
-                            elif event_type == "complete":
-                                break
-            
-            # Handle state link and multi-view table (similar to non-streaming)
-            if mutated and state_link:
-                link = state_link.get("url")
-                latest_url.value = link
-                if link != last_loaded_url and auto_load_checkbox.value:
-                    with _programmatic_viewer_update():
-                        viewer.url = link
-                        viewer._load_url()
-                    last_loaded_url = link
-                    status.object = f"**Opened:** {link}"
+                        
+                        elif event_type == "error":
+                            error_msg = event.get("error", "Unknown error")
+                            logger.error(f"Stream error: {error_msg}")
+                            yield f"Error: {error_msg}"
+                            has_yielded = True
+                            break
+                        
+                        elif event_type == "complete":
+                            break
+        
+        # Handle state link auto-load
+        link_url, status_msg = _handle_state_link_auto_load(mutated, state_link)
+        if status_msg:
+            status.object = status_msg
+        elif tool_names:
+            status.object = f"Tools: {' → '.join(tool_names)}"
+        else:
+            status.object = "Done (no view change)."
+        
+        # Only yield at the end if we haven't yielded anything yet
+        if not has_yielded:
+            if accumulated_message:
+                masked_msg = _mask_client_side(accumulated_message)
+                # Wrap tables in Markdown pane for proper rendering
+                if "|" in masked_msg and masked_msg.count("\n") > 2:
+                    yield pn.pane.Markdown(masked_msg)
                 else:
-                    status.object = "New link generated (auto-load off)."
-            elif tool_names:
-                status.object = f"Tools: {' → '.join(tool_names)}"
+                    yield masked_msg
             else:
-                status.object = "Done (no view change)."
-            
-            # Only yield at the end if we haven't yielded anything yet
-            if not has_yielded:
-                if accumulated_message:
-                    masked_msg = _mask_client_side(accumulated_message)
-                    # Wrap tables in Markdown pane for proper rendering
-                    if "|" in masked_msg and masked_msg.count("\n") > 2:
-                        yield pn.pane.Markdown(masked_msg)
-                    else:
-                        yield masked_msg
-                else:
-                    yield "(no response)"
-            
-        except Exception as e:
-            status.object = f"Streaming error: {e}"
-            yield f"Error: {e}"
+                yield "(no response)"
     
-    else:
-        # Fallback to non-streaming
-        try:
-            result = await agent_call(contents)
-            link = result.get("url")
-            mutated = bool(result.get("mutated"))
-            safe_answer = _mask_client_side(result.get("answer")) if result.get("answer") else None
-            ng_views_data = result.get("ng_views_raw")  # Raw ng_views for Tabulator rendering
-            query_data = result.get("query_data")  # Raw query result from backend for direct rendering
-            plot_data = result.get("plot_data")  # Plot result from backend for rendering
-            trace = result.get("tool_trace") or []
-            vt = result.get("views_table")
-            if trace:
-                # Build concise status line of executed tool names in order
-                tool_names = [t.get("tool") or t.get("name") for t in trace if t]
-                if tool_names:
-                    status.object = f"Tools: {' → '.join(tool_names)}"
+    except Exception as e:
+        status.object = f"Streaming error: {e}"
+        yield f"Error: {e}"
 
-            # Optional trace history retrieval
-            if trace_history_checkbox.value:
+
+# ============================================================================
+# Non-Streaming Chat Handler
+# ============================================================================
+
+async def respond_non_streaming(contents: str, user: str, **kwargs):
+    """Handle non-streaming chat with single backend call.
+    
+    Args:
+        contents: User message text
+        user: User identifier
+        **kwargs: Additional chat parameters
+    
+    Yields:
+        Chat message content (text, markdown, or Panel components)
+    """
+    global last_loaded_url
+    
+    try:
+        result = await agent_call(contents)
+        link = result.get("url")
+        mutated = bool(result.get("mutated"))
+        safe_answer = _mask_client_side(result.get("answer")) if result.get("answer") else None
+        ng_views_data = result.get("ng_views_raw")
+        query_data = result.get("query_data")
+        plot_data = result.get("plot_data")
+        trace = result.get("tool_trace") or []
+        vt = result.get("views_table")
+        
+        # Update status with tool names
+        if trace:
+            tool_names = [t.get("tool") or t.get("name") for t in trace if t]
+            if tool_names:
+                status.object = f"Tools: {' → '.join(tool_names)}"
+        
+        # Update trace history
+        await _update_trace_history()
+        
+        # Handle multi-view table errors
+        if vt and isinstance(vt, dict) and vt.get("error"):
+            warn_txt = ""
+            if vt.get("warnings"):
+                warn_txt = "\n\nWarnings:\n- " + "\n- ".join(vt.get("warnings") or [])
+            status.object = f"Multi-view error: {vt.get('error')}{warn_txt}"
+        
+        embedded_table_component = None
+        
+        # Render multi-view table if present and successful
+        if vt and isinstance(vt, dict) and vt.get("rows"):
+            rows = vt["rows"]
+            import pandas as pd
+            df_rows = []
+            for r in rows:
+                display = {k: v for k, v in r.items() if k not in ("link", "masked_link")}
+                raw = r.get("link")
+                if raw:
+                    display["view"] = f"<a href='{raw}' target='_blank'>link</a>"
+                df_rows.append(display)
+            
+            if df_rows:
+                views_table.value = pd.DataFrame(df_rows)
+                views_table.visible = True
+                views_table.disabled = False
                 try:
-                    async with httpx.AsyncClient(timeout=30) as client:
-                        hist_resp = await client.get(f"{BACKEND}/debug/tool_trace", params={"n": trace_history_length.value})
-                    hist_data = hist_resp.json()
-                    _trace_history = hist_data.get("traces", [])
-                    if _trace_history:
-                        def _payload():
-                            payload = {
-                                "exported_at": datetime.utcnow().isoformat() + 'Z',
-                                "count": len(_trace_history),
-                                "traces": _trace_history,
-                            }
-                            return io.BytesIO(json.dumps(payload, indent=2).encode('utf-8'))
-                        trace_download.callback = _payload
-                        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-                        trace_download.filename = f"trace_history_{ts}.json"
-                        trace_download.disabled = False
-                        # Update recent traces markdown (summaries only)
-                        lines: list[str] = []
-                        for i, t in enumerate(reversed(_trace_history), start=1):
-                            steps = t.get("steps", [])
-                            tool_chain = " → ".join(s.get("tool") for s in steps if s.get("tool"))
-                            mutated_flag = "✅" if t.get("mutated") else "–"
-                            final_msg = (t.get("final_message", {}).get("content") or "").strip()
-                            final_msg = final_msg[:120] + ("…" if len(final_msg) > 120 else "")
-                            lines.append(f"**{i}.** {mutated_flag} {tool_chain or '(no tools)'}\n> {final_msg}")
-                        if lines:
-                            _recent_traces_view.object = "\n\n".join(lines)
-                            _recent_traces_accordion.active = [0]
-                        else:
-                            _recent_traces_view.object = "No traces yet."
-                except Exception as e:  # pragma: no cover
-                    status.object += f" | Trace err: {e}"
-
-            # Render multi-view table if present
-            # If multi-view tool returned an error, surface it clearly (and any warnings)
-            if vt and isinstance(vt, dict) and vt.get("error"):
-                warn_txt = ""
-                if vt.get("warnings"):
-                    warn_txt = "\n\nWarnings:\n- " + "\n- ".join(vt.get("warnings") or [])
-                status.object = f"Multi-view error: {vt.get('error')}{warn_txt}"
-            embedded_table_component = None
-            # Render multi-view table if present and successful
-            if vt and isinstance(vt, dict) and vt.get("rows"):
-                rows = vt["rows"]
-                # Build DataFrame-like structure for Tabulator. Hide raw link column, show masked_link clickable.
-                import pandas as pd
-                df_rows = []
-                for r in rows:
-                    display = {k: v for k, v in r.items() if k not in ("link", "masked_link")}
-                    raw = r.get("link")
-                    # Provide a simple HTML anchor; Tabulator with html=True will render it.
-                    if raw:
-                        display["view"] = f"<a href='{raw}' target='_blank'>link</a>"
-                    df_rows.append(display)
-                if df_rows:
-                    views_table.value = pd.DataFrame(df_rows)
-                    views_table.visible = True
-                    views_table.disabled = False
-                    # Configure columns (if available) to allow HTML rendering
+                    views_table.formatters = {"view": {"type": "html"}}
+                except Exception:
+                    pass
+                
+                embedded_table_component = pn.widgets.Tabulator(
+                    views_table.value.copy(), height=220, disabled=True, selectable=False, pagination=None
+                )
+                try:
+                    embedded_table_component.formatters = {"view": {"type": "html"}}
+                except Exception:
+                    pass
+                
+                # Add click behavior
+                def _on_select(event):
+                    if not ng_links_internal.value:
+                        return
                     try:
-                        views_table.formatters = {"view": {"type": "html"}}
+                        data = views_table.value
+                        if data is not None and hasattr(data, "index") and len(data.index) > 0 and event.new:
+                            idxs = event.new
+                            if isinstance(idxs, list) and idxs:
+                                href = data.iloc[idxs[0]].get("view")
+                                if isinstance(href, str) and "href='" in href:
+                                    try:
+                                        raw_link = href.split("href='",1)[1].split("'",1)[0]
+                                        _load_internal_link(raw_link)
+                                    except Exception:
+                                        pass
                     except Exception:
                         pass
-                    # Create a lightweight embedded table (copy) for chat message rendering
-                    embedded_table_component = pn.widgets.Tabulator(
-                        views_table.value.copy(), height=220, disabled=True, selectable=False, pagination=None
-                    )
+                
+                global _views_table_watcher_added
+                if not _views_table_watcher_added:
                     try:
-                        embedded_table_component.formatters = {"view": {"type": "html"}}
+                        views_table.param.watch(_on_select, 'selection')
+                        _views_table_watcher_added = True
                     except Exception:
                         pass
-                    # Add click behavior: when selecting a row, open link
-                    def _on_select(event):  # pragma: no cover UI callback
-                        if not ng_links_internal.value:
-                            return
-                        try:
-                            data = views_table.value
-                            if data is not None and hasattr(data, "index") and len(data.index) > 0 and event.new:
-                                idxs = event.new
-                                if isinstance(idxs, list) and idxs:
-                                    # Reconstruct raw link from view cell href if needed
-                                    href = data.iloc[idxs[0]].get("view")
-                                    if isinstance(href, str) and "href='" in href:
-                                        try:
-                                            raw_link = href.split("href='",1)[1].split("'",1)[0]
-                                            _load_internal_link(raw_link)
-                                        except Exception:
-                                            pass
-                        except Exception:
-                            pass
-                    global _views_table_watcher_added
-                    if not _views_table_watcher_added:
-                        try:
-                            views_table.param.watch(_on_select, 'selection')
-                            _views_table_watcher_added = True
-                        except Exception:
-                            # Fallback: silently ignore if watcher cannot be set (should not happen normally)
-                            pass
-                # Auto-load first link if auto-load enabled
+                
+                # Auto-load first link
                 if ng_links_internal.value and auto_load_checkbox.value and rows:
                     _load_internal_link(rows[0].get("link"))
-
-            if mutated and link and not vt:  # avoid duplicate load after views_table logic
-                latest_url.value = link
-                masked = result.get("masked") or f"[Updated Neuroglancer view]({link})"
-                if link != last_loaded_url:
-                    if auto_load_checkbox.value:
-                        with _programmatic_viewer_update():
-                            viewer.url = link
-                            viewer._load_url()
-                        last_loaded_url = link
-                        status.object = f"**Opened:** {link}"
-                    else:
-                        status.object = "New link generated (auto-load off)."
-                else:
-                    status.object = "State updated (no link change)."
-                if safe_answer:
-                    yield f"{safe_answer}\n\n{masked}"
-                else:
-                    yield masked
+        
+        # Handle state link for single mutations (not multi-view)
+        if mutated and link and not vt:
+            latest_url.value = link
+            masked = result.get("masked") or f"[Updated Neuroglancer view]({link})"
+            link_url, status_msg = _handle_state_link_auto_load(mutated, {"url": link}, link)
+            if status_msg:
+                status.object = status_msg
+            
+            if safe_answer:
+                yield f"{safe_answer}\n\n{masked}"
             else:
-                if not trace:
-                    status.object = "Done (no view change)."
-                # If we have an embedded table, return a structured chat message containing both text & component
-                if embedded_table_component is not None:
-                    # Wrap answer + table in a single Column so ChatInterface doesn't display list repr.
-                    if safe_answer:
-                        yield pn.Column(pn.pane.Markdown(safe_answer), embedded_table_component, sizing_mode="stretch_width")
-                    else:
-                        yield pn.Column(embedded_table_component, sizing_mode="stretch_width")
+                yield masked
+        else:
+            if not trace:
+                status.object = "Done (no view change)."
+            
+            # Return embedded table if present
+            if embedded_table_component is not None:
+                if safe_answer:
+                    yield pn.Column(pn.pane.Markdown(safe_answer), embedded_table_component, sizing_mode="stretch_width")
                 else:
-                    # Check if we have query_data for direct Tabulator rendering
-                    logger.info(f"Checking query_data: present={query_data is not None}, type={type(query_data) if query_data else 'None'}")
-                    if query_data:
-                        logger.info(f"query_data keys: {list(query_data.keys()) if isinstance(query_data, dict) else 'not a dict'}")
-                        if isinstance(query_data, dict):
-                            logger.info(f"query_data['data'] present: {'data' in query_data}, rows: {query_data.get('rows')}")
+                    yield pn.Column(embedded_table_component, sizing_mode="stretch_width")
+            
+            # Render query_data as Tabulator
+            elif query_data and isinstance(query_data, dict) and query_data.get("data"):
+                logger.info(f"✅ Rendering Tabulator from query_data: {query_data.get('rows')} rows")
+                
+                # Check if we also have plot_data
+                tabulator_widget = None
+                if plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
+                    if not show_query_tables.value:
+                        logger.info("Skipping query table rendering because plot_data is present and show_query_tables=False")
+                    else:
+                        tabulator_widget = _create_tabulator_from_query_data(query_data)
+                else:
+                    tabulator_widget = _create_tabulator_from_query_data(query_data)
+                
+                expression = query_data.get("expression", "")
+                workspace_button = _create_workspace_button_for_query(query_data)
+                components = _build_query_result_components(safe_answer, expression, tabulator_widget, workspace_button)
+                
+                yield pn.Column(
+                    *components,
+                    sizing_mode="stretch_width",
+                    min_height=200,
+                    margin=(0, 0, 20, 0)
+                )
+            
+            # Render plot_data natively
+            elif plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
+                logger.info(f"✅ Rendering plot from plot_data: type={plot_data.get('plot_type')}, interactive={plot_data.get('is_interactive')}")
+                
+                try:
+                    source_id = plot_data.get("source_id")
+                    plot_kwargs = plot_data.get("plot_kwargs", {})
+                    plot_type = plot_data.get("plot_type", "scatter")
+                    expression = plot_data.get("expression", "")
+                    plot_data_rows = plot_data.get("data")
                     
-                    if query_data and isinstance(query_data, dict) and query_data.get("data"):
-                        # Backend provided structured data - render directly as Tabulator
-                        logger.info(f"✅ Rendering Tabulator from query_data: {query_data.get('rows')} rows")
+                    if plot_data_rows:
+                        import polars as pl
+                        df = pl.DataFrame(plot_data_rows)
                         
-                        # Check if we also have plot_data - if so, skip table unless show_query_tables is True
-                        tabulator_widget = None
-                        if plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
-                            if not show_query_tables.value:
-                                logger.info("Skipping query table rendering because plot_data is present and show_query_tables=False")
-                                # Skip the table, let the plot rendering happen in the elif below
-                            else:
-                                # Show both table and plot
-                                tabulator_widget = _create_tabulator_from_query_data(query_data)
+                        # For bar plots, ensure x-axis column is categorical
+                        if plot_type == "bar" and 'x' in plot_kwargs:
+                            x_col = plot_kwargs['x']
+                            if x_col in df.columns:
+                                df = df.with_columns(pl.col(x_col).cast(pl.Utf8))
+                        
+                        import hvplot.polars
+                        
+                        # Create the plot
+                        if plot_type == "scatter":
+                            plot = df.hvplot.scatter(**plot_kwargs)
+                        elif plot_type == "line":
+                            plot = df.hvplot.line(**plot_kwargs)
+                        elif plot_type == "bar":
+                            bar_kwargs = plot_kwargs.copy()
+                            bar_kwargs.pop('by', None)
+                            plot = df.hvplot.bar(**bar_kwargs)
+                        elif plot_type == "heatmap":
+                            plot = df.hvplot.heatmap(**plot_kwargs)
                         else:
-                            # No plot data, always create the table
-                            tabulator_widget = _create_tabulator_from_query_data(query_data)
+                            plot = df.hvplot(**plot_kwargs)
                         
-                        # Extract and display the Polars expression
-                        expression = query_data.get("expression", "")
-                        expression_display = None
-                        if expression:
-                            # Format expression in a code block
-                            expression_display = pn.pane.Markdown(
-                                f"```python\n{expression}\n```",
-                                sizing_mode="stretch_width",
-                                margin=(5, 5, 10, 5)
-                            )
-                        
-                        # Create workspace button
-                        workspace_button = pn.widgets.Button(
-                            name="📊 Add to Workspace",
-                            button_type="primary",
-                            sizing_mode="fixed",
-                            width=150,
-                            margin=(5, 0)
+                        plot_pane = pn.pane.HoloViews(
+                            object=plot,
+                            sizing_mode="stretch_width",
+                            height=400
                         )
                         
-                        # Capture data in closure
-                        captured_data = query_data
+                        plot_info = f"**{plot_type.capitalize()}** plot • "
+                        plot_info += f"{'Interactive' if plot_data.get('is_interactive') else 'Static'} • "
+                        plot_info += f"{plot_data.get('row_count', 0)} points"
                         
-                        def add_to_workspace(event):
-                            _add_result_to_workspace_from_data(captured_data)
-                            workspace_button.name = "✓ Added to Workspace"
-                            workspace_button.button_type = "success"
-                            workspace_button.disabled = True
+                        x = plot_kwargs.get('x', '')
+                        y = plot_kwargs.get('y', '')
+                        workspace_button = _create_workspace_button_for_plot(plot_pane, plot_type, x, y)
+                        components = _build_plot_result_components(safe_answer, expression, plot_pane, plot_info, workspace_button)
                         
-                        workspace_button.on_click(add_to_workspace)
-                        
-                        # Build components to display
-                        components = []
-                        
-                        # Add LLM context if present (strip out code blocks since expression is shown separately)
-                        if safe_answer and safe_answer.strip():
-                            llm_text = safe_answer.strip()
-                            
-                            # Remove code blocks (expression is rendered separately by frontend)
-                            import re
-                            llm_text = re.sub(r'```[a-z]*\n.*?\n```', '', llm_text, flags=re.DOTALL)
-                            llm_text = llm_text.strip()
-                            
-                            # Filter out if it looks like the LLM is listing data rows
-                            # (has many lines with colons indicating key-value pairs)
-                            if llm_text:
-                                line_count = llm_text.count("\n")
-                                colon_count = llm_text.count(":")
-                                # If it has many colons and lines, it's probably formatting data
-                                if not (line_count > 5 and colon_count > line_count):
-                                    components.append(pn.pane.Markdown(llm_text, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
-                        
-                        # Always add expression display (already created above)
-                        if expression_display:
-                            components.append(expression_display)
-                        
-                        # Add table and button (only if table was created)
-                        if tabulator_widget is not None:
-                            components.append(tabulator_widget)
-                        components.append(workspace_button)
-                        
-                        # Return all components in a column
                         yield pn.Column(
                             *components,
                             sizing_mode="stretch_width",
-                            min_height=200,  # Ensure minimum height to prevent overlay
-                            margin=(0, 0, 20, 0)  # Add bottom margin for spacing
-                        )
-                    # Check if we have plot_data for direct plot rendering
-                    elif plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
-                        # Backend provided plot spec - render natively with hvplot
-                        logger.info(f"✅ Rendering plot from plot_data: type={plot_data.get('plot_type')}, interactive={plot_data.get('is_interactive')}")
-                        
-                        # Fetch the dataframe from backend to recreate plot
-                        try:
-                            source_id = plot_data.get("source_id")
-                            plot_kwargs = plot_data.get("plot_kwargs", {})
-                            plot_type = plot_data.get("plot_type", "scatter")
-                            expression = plot_data.get("expression", "")
-                            
-                            # Use the transformed data directly from plot_data (not fetching from source)
-                            plot_data_rows = plot_data.get("data")
-                            
-                            if plot_data_rows:
-                                # Convert to polars dataframe for hvplot
-                                import polars as pl
-                                df = pl.DataFrame(plot_data_rows)
-                                
-                                # For bar plots, ensure x-axis column is treated as categorical
-                                # This prevents numeric cluster IDs from being treated as continuous
-                                if plot_type == "bar" and 'x' in plot_kwargs:
-                                    x_col = plot_kwargs['x']
-                                    if x_col in df.columns:
-                                        # Cast to string to ensure categorical treatment
-                                        df = df.with_columns(pl.col(x_col).cast(pl.Utf8))
-                                
-                                # Import hvplot.polars to enable .hvplot accessor
-                                import hvplot.polars
-                                
-                                # Create the plot using hvplot
-                                if plot_type == "scatter":
-                                    plot = df.hvplot.scatter(**plot_kwargs)
-                                elif plot_type == "line":
-                                    plot = df.hvplot.line(**plot_kwargs)
-                                elif plot_type == "bar":
-                                    # For bar plots, ensure y is treated as single column (not multi-column stack)
-                                    # by using kind='bar' with explicit column specification
-                                    bar_kwargs = plot_kwargs.copy()
-                                    # Don't pass 'by' for simple bar charts (causes grouping issues)
-                                    bar_kwargs.pop('by', None)
-                                    plot = df.hvplot.bar(**bar_kwargs)
-                                elif plot_type == "heatmap":
-                                    plot = df.hvplot.heatmap(**plot_kwargs)
-                                else:
-                                    plot = df.hvplot(**plot_kwargs)
-                                
-                                # Wrap in Panel's HoloViews pane for native rendering
-                                plot_pane = pn.pane.HoloViews(
-                                    object=plot,
-                                    sizing_mode="stretch_width",
-                                    height=400  # Fixed height to ensure proper spacing in chat
-                                )
-                                
-                                # Build components
-                                components = []
-                                
-                                # Add LLM context if present
-                                if safe_answer and safe_answer.strip():
-                                    llm_text = safe_answer.strip()
-                                    import re
-                                    llm_text = re.sub(r'```[a-z]*\n.*?\n```', '', llm_text, flags=re.DOTALL)
-                                    llm_text = llm_text.strip()
-                                    if llm_text:
-                                        components.append(pn.pane.Markdown(llm_text, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
-                                
-                                # Add expression if present
-                                if expression:
-                                    expression_display = pn.pane.Markdown(
-                                        f"**Data transformation:**\n```python\n{expression}\n```",
-                                        sizing_mode="stretch_width",
-                                        margin=(5, 5, 10, 5)
-                                    )
-                                    components.append(expression_display)
-                                
-                                # Add plot info
-                                plot_info = f"**{plot_type.capitalize()}** plot • "
-                                plot_info += f"{'Interactive' if plot_data.get('is_interactive') else 'Static'} • "
-                                plot_info += f"{plot_data.get('row_count', 0)} points"
-                                components.append(pn.pane.Markdown(plot_info, sizing_mode="stretch_width", margin=(5, 5, 5, 5)))
-                                
-                                # Add the plot
-                                components.append(plot_pane)
-                                
-                                # Add workspace button
-                                workspace_button = pn.widgets.Button(
-                                    name="📊 Add Plot to Workspace",
-                                    button_type="primary",
-                                    sizing_mode="fixed",
-                                    width=180,
-                                    margin=(5, 0)
-                                )
-                                
-                                # Capture plot info in closure
-                                captured_plot_pane = plot_pane
-                                captured_plot_type = plot_type
-                                captured_x = plot_kwargs.get('x', '')
-                                captured_y = plot_kwargs.get('y', '')
-                                plot_summary = f"{captured_x} vs {captured_y}" if captured_x and captured_y else None
-                                
-                                def add_plot_to_workspace(event):
-                                    _add_plot_to_workspace(captured_plot_pane, captured_plot_type, plot_summary)
-                                    workspace_button.name = "✓ Added to Workspace"
-                                    workspace_button.button_type = "success"
-                                    workspace_button.disabled = True
-                                
-                                workspace_button.on_click(add_plot_to_workspace)
-                                components.append(workspace_button)
-                                
-                                # Return all components
-                                yield pn.Column(
-                                    *components,
-                                    sizing_mode="stretch_width",
-                                    margin=(0, 0, 30, 0)  # Larger bottom margin for clear spacing
-                                )
-                            else:
-                                yield "Error: No plot data received from backend"
-                        except Exception as e:
-                            logger.exception("Failed to render plot")
-                            yield f"Error rendering plot: {str(e)}"
-                    # Check if safe_answer contains a table (has pipe characters in multiple lines)
-                    elif safe_answer and "|" in safe_answer and safe_answer.count("\n") > 2:
-                        # Legacy: LLM generated markdown table
-                        tabulator_widget = _create_tabulator_from_markdown(safe_answer, ng_views_data)
-                        
-                        # Create "Add to Workspace" button
-                        workspace_button = pn.widgets.Button(
-                            name="📊 Add to Workspace",
-                            button_type="primary",
-                            sizing_mode="fixed",
-                            width=200,
-                            margin=(5, 0)
-                        )
-                        
-                        # Capture table and ng_views in closure
-                        captured_table = safe_answer
-                        captured_ng_views = ng_views_data
-                        
-                        def add_to_workspace(event):
-                            _add_result_to_workspace(captured_table, captured_ng_views)
-                            workspace_button.name = "✓ Added to Workspace"
-                            workspace_button.button_type = "success"
-                            workspace_button.disabled = True
-                        
-                        workspace_button.on_click(add_to_workspace)
-                        
-                        yield pn.Column(
-                            tabulator_widget,
-                            workspace_button,
-                            sizing_mode="stretch_width",
-                            min_height=200,  # Ensure minimum height to prevent overlay
-                            margin=(0, 0, 20, 0)  # Add bottom margin for spacing
+                            margin=(0, 0, 30, 0)
                         )
                     else:
-                        yield safe_answer if safe_answer else "(no response)"
-        except Exception as e:
-            status.object = f"Error: {e}"
-            yield f"Error: {e}"
+                        yield "Error: No plot data received from backend"
+                except Exception as e:
+                    logger.exception("Failed to render plot")
+                    yield f"Error rendering plot: {str(e)}"
+            
+            # Legacy markdown table rendering
+            elif safe_answer and "|" in safe_answer and safe_answer.count("\n") > 2:
+                tabulator_widget = _create_tabulator_from_markdown(safe_answer, ng_views_data)
+                workspace_button = _create_workspace_button_for_table(safe_answer, ng_views_data)
+                
+                yield pn.Column(
+                    tabulator_widget,
+                    workspace_button,
+                    sizing_mode="stretch_width",
+                    min_height=200,
+                    margin=(0, 0, 20, 0)
+                )
+            else:
+                yield safe_answer if safe_answer else "(no response)"
+    
+    except Exception as e:
+        logger.exception("Chat error")
+        status.object = f"Error: {e}"
+        yield f"Error: {e}"
+
+
+# ============================================================================
+# Main Chat Entry Point
+# ============================================================================
+
+async def respond(contents: str, user: str, **kwargs):
+    """Main chat callback - dispatches to streaming or non-streaming handler.
+    
+    Args:
+        contents: User message text
+        user: User identifier
+        **kwargs: Additional chat parameters
+    
+    Yields:
+        Chat message content from appropriate handler
+    """
+    if USE_STREAMING:
+        async for result in respond_streaming(contents, user, **kwargs):
+            yield result
+    else:
+        async for result in respond_non_streaming(contents, user, **kwargs):
+            yield result
+
 
 # ---------------- Chat UI ----------------
 chat = ChatInterface(
