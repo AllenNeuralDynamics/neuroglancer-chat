@@ -90,6 +90,7 @@ class NeuroglancerState:
                 "annotationColor": color,
                 "annotations": [],  # annotations array at layer level
                 "name": name,
+                "visible": kwargs.pop("visible", True),  # Make annotation layers visible by default
             }
         else:
             # For image/segmentation layers, use string source

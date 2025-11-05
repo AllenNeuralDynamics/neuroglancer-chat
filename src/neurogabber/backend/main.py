@@ -60,7 +60,12 @@ def _dbg(msg: str):  # lightweight wrapper to centralize debug guard
     """Debug logging wrapper - now uses proper logger.debug()"""
     logger.debug(msg)
 
+# Configure FastAPI with increased file upload limit (500MB)
 app = FastAPI()
+
+# Configure request body size limit (500MB for CSV uploads)
+# This needs to be set at the ASGI server level (uvicorn) as well
+app.state.max_upload_size = 500 * 1024 * 1024  # 500 MB
 
 # Log debug mode status on startup
 if DEBUG_ENABLED:
@@ -203,32 +208,68 @@ def t_set_viewer_settings(args: NgSetViewerSettings):
 
 @app.post("/tools/ng_annotations_add")
 def t_add_annotations(args: AddAnnotations):
+    """Add annotation(s) to a layer. Accepts either single annotation or items array."""
     global CURRENT_STATE
+    from .models import Vec3, Annotation
+    
+    # Convert single annotation format to items array if needed
+    annotations_list = args.items if args.items else []
+    
+    if not annotations_list and args.center:
+        # Single annotation provided - convert to Annotation object
+        ann_type = args.type or "point"
+        center_obj = Vec3(x=args.center['x'], y=args.center['y'], z=args.center['z'])
+        size_obj = None
+        if args.size:
+            size_obj = Vec3(x=args.size.get('x', 1), y=args.size.get('y', 1), z=args.size.get('z', 1))
+        elif ann_type in ["box", "ellipsoid"]:
+            size_obj = Vec3(x=1, y=1, z=1)  # Default size
+        
+        annotation = Annotation(
+            type=ann_type,
+            center=center_obj,
+            size=size_obj,
+            id=args.id
+        )
+        annotations_list = [annotation]
+    
+    if not annotations_list:
+        return {"ok": False, "error": "Must provide either 'items' array or 'center' for single annotation"}
+    
+    # Convert to Neuroglancer format
+    # Check if state has time dimension - if so, add 4th coordinate (default to 0)
+    has_time_dim = 't' in CURRENT_STATE.data.get('dimensions', {})
+    
     items = []
-    for a in args.items:
+    for a in annotations_list:
         if a.type == "point":
             # Must include 'type' field as per Neuroglancer schema
+            # If state has time dimension, include 4th coordinate
+            point_coords = [a.center.x, a.center.y, a.center.z, 0] if has_time_dim else [a.center.x, a.center.y, a.center.z]
             items.append({
-                "point": [a.center.x, a.center.y, a.center.z],
+                "point": point_coords,
                 "type": "point",
                 "id": a.id or None
             })
         elif a.type == "box":
+            point_coords = [a.center.x, a.center.y, a.center.z, 0] if has_time_dim else [a.center.x, a.center.y, a.center.z]
             items.append({
                 "type": "box",
-                "point": [a.center.x, a.center.y, a.center.z],
+                "point": point_coords,
                 "size": [a.size.x, a.size.y, a.size.z],
                 "id": a.id or None
             })
         elif a.type == "ellipsoid":
+            center_coords = [a.center.x, a.center.y, a.center.z, 0] if has_time_dim else [a.center.x, a.center.y, a.center.z]
             items.append({
                 "type": "ellipsoid",
-                "center": [a.center.x, a.center.y, a.center.z],
+                "center": center_coords,
                 "radii": [a.size.x/2, a.size.y/2, a.size.z/2],
                 "id": a.id or None
             })
+    
     CURRENT_STATE.add_annotations(args.layer, items)
-    return {"ok": True}
+    return {"ok": True, "n_annotations": len(items)}
 
 @app.post("/tools/data_plot_histogram")
 def t_hist(args: HistogramReq):
@@ -1018,7 +1059,6 @@ def _mask_ng_urls(text: str) -> str:
     Skips masking if the text already contains markdown table with [view](...) links
     to avoid double-wrapping.
     """
-    logger.info(f"{text}")
     import re
     
     # Check if text contains markdown table with [view](...) links (from query results)
@@ -1172,6 +1212,16 @@ async def upload_file(file: UploadFile = File(...)):
 @app.post("/tools/data_list_files")
 def t_data_list_files():
     return {"files": DATA_MEMORY.list_files()}
+
+@app.post("/delete_file")
+def delete_file(file_id: str):
+    """Delete an uploaded file and all its derived summaries."""
+    try:
+        if DATA_MEMORY.remove_file(file_id):
+            return {"ok": True}
+        return {"ok": False, "error": "File not found"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 @app.post("/tools/data_info")
 def t_data_info(args: DataInfo):
@@ -1546,7 +1596,10 @@ def t_data_ng_views_table(args: NgViewsTable):
         }
     except Exception as e:
         import traceback
-        return {"error": str(e), "trace": traceback.format_exc()}
+        error_trace = traceback.format_exc()
+        logger.error(f"data_ng_annotations_from_data exception: {type(e).__name__}: {e}")
+        _dbg(f"Exception trace: {error_trace}")
+        return {"error": str(e), "trace": error_trace}
 
 
 @app.post("/tools/data_ng_annotations_from_data")
@@ -1585,19 +1638,25 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
                 file_id = files[-1]["file_id"]
                 _dbg(f"No recent query, auto-selected most recent file: {file_id}")
             else:
-                return {"error": "No file_id or summary_id provided and no files uploaded"}
+                error_msg = "No file_id or summary_id provided and no files uploaded"
+                logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+                return {"error": error_msg}
     
     if file_id and summary_id:
-        return {"error": "Provide either file_id OR summary_id, not both"}
+        error_msg = "Provide either file_id OR summary_id, not both"
+        logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+        return {"error": error_msg}
     
     try:
         # Get source dataframe
         if file_id:
             df = DATA_MEMORY.get_df(file_id)
             source_fid = file_id
+            _dbg(f"Loaded dataframe from file_id={file_id}, shape={df.height}x{df.width}, columns={df.columns}")
         else:
             df = DATA_MEMORY.get_summary_df(summary_id)
             source_fid = DATA_MEMORY.get_summary_record(summary_id).source_file_id
+            _dbg(f"Loaded dataframe from summary_id={summary_id}, shape={df.height}x{df.width}, columns={df.columns}")
         
         # Apply filter expression if provided
         if filter_expression:
@@ -1608,24 +1667,38 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
                 
                 if isinstance(result, pl.DataFrame):
                     df = result
+                    _dbg(f"Filter applied, new shape={df.height}x{df.width}")
                 elif isinstance(result, pl.Series):
                     df = pl.DataFrame({result.name or "value": result})
+                    _dbg(f"Filter returned Series, converted to DataFrame, shape={df.height}x{df.width}")
                 else:
-                    return {"error": f"filter_expression must return a DataFrame or Series, got {type(result).__name__}"}
+                    error_msg = f"filter_expression must return a DataFrame or Series, got {type(result).__name__}"
+                    logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+                    return {"error": error_msg}
             except Exception as e:
-                return {"error": f"filter_expression failed: {e}"}
+                error_msg = f"filter_expression failed: {e}"
+                logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+                _dbg(f"Filter expression error details: {type(e).__name__}: {e}")
+                return {"error": error_msg}
         
         # Validate required columns exist
         missing_cols = [c for c in center_columns if c not in df.columns]
         if missing_cols:
+            error_msg = f"Missing required center columns: {missing_cols}. Available columns: {df.columns}"
+            logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+            _dbg(f"Column validation failed. Needed: {center_columns}, Available: {df.columns}")
             return {"error": f"Missing required center columns: {missing_cols}", "available_columns": df.columns}
         
         if annotation_type in ["box", "ellipsoid"] and not size_columns:
-            return {"error": f"annotation_type '{annotation_type}' requires size_columns parameter"}
+            error_msg = f"annotation_type '{annotation_type}' requires size_columns parameter"
+            logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+            return {"error": error_msg}
         
         if size_columns:
             missing_size_cols = [c for c in size_columns if c not in df.columns]
             if missing_size_cols:
+                error_msg = f"Missing size columns: {missing_size_cols}. Available columns: {df.columns}"
+                logger.error(f"data_ng_annotations_from_data error: {error_msg}")
                 return {"error": f"Missing size columns: {missing_size_cols}", "available_columns": df.columns}
         
         # Limit rows
@@ -1649,6 +1722,9 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
                     break
         
         # Build annotation items from dataframe rows
+        # Check if state has time dimension - if so, add 4th coordinate (default to 0)
+        has_time_dim = 't' in CURRENT_STATE.data.get('dimensions', {})
+        
         items = []
         for idx, row in enumerate(df.to_dicts()):
             try:
@@ -1664,8 +1740,10 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
                     ann_id = str(uuid.uuid4())
                 
                 if annotation_type == "point":
+                    # If state has time dimension, include 4th coordinate (default to 0)
+                    point_coords = [cx, cy, cz, 0] if has_time_dim else [cx, cy, cz]
                     items.append({
-                        "point": [cx, cy, cz],
+                        "point": point_coords,
                         "type": "point",
                         "id": ann_id
                     })
@@ -1673,19 +1751,30 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
                     sx = float(row[size_columns[0]])
                     sy = float(row[size_columns[1]])
                     sz = float(row[size_columns[2]])
-                    items.append({
-                        "type": "axis_aligned_bounding_box",
-                        "pointA": [cx - sx/2, cy - sy/2, cz - sz/2],
-                        "pointB": [cx + sx/2, cy + sy/2, cz + sz/2],
-                        "id": ann_id
-                    })
+                    # For boxes, add time coord to both points if needed
+                    if has_time_dim:
+                        items.append({
+                            "type": "axis_aligned_bounding_box",
+                            "pointA": [cx - sx/2, cy - sy/2, cz - sz/2, 0],
+                            "pointB": [cx + sx/2, cy + sy/2, cz + sz/2, 0],
+                            "id": ann_id
+                        })
+                    else:
+                        items.append({
+                            "type": "axis_aligned_bounding_box",
+                            "pointA": [cx - sx/2, cy - sy/2, cz - sz/2],
+                            "pointB": [cx + sx/2, cy + sy/2, cz + sz/2],
+                            "id": ann_id
+                        })
                 elif annotation_type == "ellipsoid":
                     rx = float(row[size_columns[0]]) / 2
                     ry = float(row[size_columns[1]]) / 2
                     rz = float(row[size_columns[2]]) / 2
+                    # Ellipsoids use center, add time if needed
+                    center_coords = [cx, cy, cz, 0] if has_time_dim else [cx, cy, cz]
                     items.append({
                         "type": "ellipsoid",
-                        "center": [cx, cy, cz],
+                        "center": center_coords,
                         "radii": [rx, ry, rz],
                         "id": ann_id
                     })
@@ -1694,12 +1783,16 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
                 continue
         
         if not items:
+            error_msg = f"No valid annotation items created from dataframe (df had {df.height} rows)"
+            logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+            _dbg(f"Failed to create annotations - check row iteration and column values")
             return {"error": "No valid annotation items created from dataframe"}
         
         # Add annotations to the layer
         CURRENT_STATE.add_annotations(layer_name, items)
         
-        _dbg(f"Added {len(items)} annotations to layer '{layer_name}'")
+        _dbg(f"✅ Successfully added {len(items)} annotations to layer '{layer_name}'")
+        logger.info(f"Added {len(items)} annotation points to layer '{layer_name}'")
         
         return {
             "ok": True,
@@ -1913,6 +2006,11 @@ def t_data_list_plots():
 # ==============================================================================
 # End Plotting Tools
 # ==============================================================================
+
+@app.get("/debug/raw_state")
+def debug_raw_state():
+    """Return the raw CURRENT_STATE data structure for debugging."""
+    return CURRENT_STATE.as_dict()
 
 @app.post("/system/reset")
 def system_reset():

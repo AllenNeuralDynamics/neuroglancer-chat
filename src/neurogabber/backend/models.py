@@ -27,7 +27,12 @@ class Annotation(BaseModel):
 
 class AddAnnotations(BaseModel):
     layer: str
-    items: List[Annotation]
+    # Support both single annotation (type/center/size/id) and bulk (items array)
+    type: Optional[Literal["point", "box", "ellipsoid"]] = None
+    center: Optional[dict] = None  # {x, y, z}
+    size: Optional[dict] = None    # {x, y, z}
+    id: Optional[str] = None
+    items: Optional[List[Annotation]] = None
 
 
 class HistogramReq(BaseModel):
@@ -86,7 +91,7 @@ class DataQuery(BaseModel):
     summary_id: Optional[str] = None
     expression: str
     save_as: Optional[str] = None
-    limit: int = 100
+    limit: int = 1000  # Increased from 100 to 1000
 
 
 class DataPlot(BaseModel):

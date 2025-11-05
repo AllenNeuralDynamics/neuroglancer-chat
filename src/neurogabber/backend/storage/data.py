@@ -4,7 +4,7 @@ from datetime import datetime
 
 import polars as pl
 
-MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB cap
+MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB cap (matches uvicorn limit)
 
 
 class UploadedFileRecord:
@@ -99,13 +99,46 @@ class DataMemory:
             df = pl.read_csv(raw)
         except Exception as e:  # pragma: no cover - defensive
             raise ValueError(f"Failed to parse CSV: {e}") from e
-        fid = uuid.uuid4().hex[:8]
+        
+        # Check for duplicate filename and replace if exists
+        existing_fid = None
+        for fid, rec in self.files.items():
+            if rec.name == name:
+                existing_fid = fid
+                break
+        
+        if existing_fid:
+            # Reuse existing file_id when replacing
+            fid = existing_fid
+        else:
+            # Generate new file_id for new file
+            fid = uuid.uuid4().hex[:8]
+        
         rec = UploadedFileRecord(fid, name, len(raw), df)
         self.files[fid] = rec
         return rec.to_meta()
 
     def list_files(self) -> List[dict]:
         return [rec.to_meta() for rec in self.files.values()]
+
+    def remove_file(self, file_id: str) -> bool:
+        """Remove a file and all its derived summaries. Returns True if file existed."""
+        if file_id not in self.files:
+            return False
+        
+        # Remove the file
+        del self.files[file_id]
+        
+        # Remove all summaries derived from this file
+        to_remove = [sid for sid, rec in self.summaries.items() 
+                     if rec.source_file_id == file_id]
+        for sid in to_remove:
+            del self.summaries[sid]
+            # Also remove from order tracking
+            if sid in self.summary_order:
+                self.summary_order.remove(sid)
+        
+        return True
 
     def get_df(self, file_id: str) -> pl.DataFrame:
         if file_id not in self.files:

@@ -63,47 +63,39 @@ Dataframe rules - ACTION REQUIRED:
 � QUERY RESULT CHAINING - CRITICAL FOR MULTI-STEP WORKFLOWS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-⚠️ IMPORTANT: All data_query_polars results are AUTOMATICALLY SAVED!
-• Every query returns a summary_id in the response
-• You can use that summary_id for follow-up operations
-• Query results contain the TRANSFORMED data (filtered/aggregated/etc.)
-• SHORTCUT: Use summary_id="last" OR omit both file_id and summary_id to use the most recent query
+⚠️ CRITICAL: file_id vs summary_id Selection Logic
+• file_id: Use for ORIGINAL uploaded CSV data with ALL columns intact
+• summary_id: Use ONLY if query result still has ALL columns you need
+• Query results from group_by/agg operations DROP columns not in aggregation
+• When in doubt, use file_id + filter_expression (safer, always has all columns)
 
-Example: "Get top cell per cluster and annotate them"
+Example: "Annotate cell 74330 where chan==638"
 
-✅ CORRECT Option 1 (Use explicit summary_id):
-   Step 1: data_query_polars(
-       file_id="abc123",
-       expression="df.group_by('cluster_label').agg(...)"
+✅ CORRECT (Use file_id with filter_expression):
+   data_ng_annotations_from_data(
+       file_id="abc123",  # ← Original data has ALL columns (chan, cell_id, x, y, z, etc.)
+       filter_expression="df.filter(pl.col('chan')==638).filter(pl.col('cell_id')==74330)",
+       layer_name="Cell",
+       center_columns=["x", "y", "z"]
    )
-   → Response: {"summary_id": "query_789", "rows": 20, ...}
-   
+
+❌ WRONG (Using summary_id after aggregation):
+   Step 1: data_query_polars(expression="df.group_by('cell_id').agg(...)")  # Drops 'chan' column!
    Step 2: data_ng_annotations_from_data(
-       summary_id="query_789",  # ← Explicit summary_id
-       layer_name="Clusters",
-       ...
+       summary_id="last",  # ← Summary only has cell_id and aggregated columns
+       filter_expression="df.filter(pl.col('chan')==638)"  # ← ERROR: 'chan' not in summary!
    )
 
-✅ CORRECT Option 2 (Use "last" shorthand):
-   Step 1: data_query_polars(expression="...")
-   Step 2: data_ng_annotations_from_data(
-       summary_id="last",  # ← Automatic reference to most recent query
-       layer_name="Clusters",
-       ...
-   )
+✅ WHEN TO USE summary_id:
+   • Query used .filter() or .head() only (preserves all columns)
+   • You explicitly included all needed columns in .select() or .agg()
+   • Example: data_query_polars(expression="df.filter(pl.col('volume') > 100)")
+   → Safe to use summary_id because all original columns remain
 
-✅ CORRECT Option 3 (Omit both - auto-uses last query):
-   Step 1: data_query_polars(expression="...")
-   Step 2: data_ng_annotations_from_data(
-       # No file_id or summary_id → automatically uses last query result
-       layer_name="Clusters",
-       ...
-   )
-
-❌ WRONG (Using original file_id):
-   Step 1: data_query_polars(file_id="abc123", expression="...")
-   Step 2: data_ng_annotations_from_data(file_id="abc123", ...)  # ← WRONG!
-   → Creates annotations from ALL cells in original file, not the query result! ✗
+❌ WHEN TO USE file_id INSTEAD:
+   • Previous query used .group_by().agg() (drops non-aggregated columns)
+   • You need columns not in the query result
+   • Unsure what columns are in summary → default to file_id
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 �📚 WORKFLOW RECIPES - Common Task Patterns
@@ -288,13 +280,35 @@ TOOLS = [
     "type":"function",
     "function": {
       "name":"ng_annotations_add",
-      "description":"Add annotations to a layer",
+      "description":"Add annotation(s) to a layer using explicit coordinates. Use for: 1) Adding a single annotation at specific coordinates (provide center/type), 2) Adding multiple programmatically-defined annotations (provide items array). For annotations from uploaded CSV/dataframe data, use data_ng_annotations_from_data instead.",
       "parameters": {
         "type": "object",
         "properties": {
-          "layer": {"type": "string"},
+          "layer": {"type": "string", "description": "Name of annotation layer to add to"},
+          "type": {"type": "string", "enum": ["point", "box", "ellipsoid"], "description": "Annotation type (for single annotation)"},
+          "center": {
+            "type": "object",
+            "description": "Coordinates for single annotation",
+            "properties": {
+              "x": {"type": "number"},
+              "y": {"type": "number"},
+              "z": {"type": "number"}
+            },
+            "required": ["x", "y", "z"]
+          },
+          "size": {
+            "type": "object",
+            "description": "Size dimensions for box/ellipsoid (optional for single annotation)",
+            "properties": {
+              "x": {"type": "number"},
+              "y": {"type": "number"},
+              "z": {"type": "number"}
+            }
+          },
+          "id": {"type": "string", "description": "Optional ID for single annotation"},
           "items": {
             "type": "array",
+            "description": "Array of annotation objects (for bulk operations)",
             "items": {
               "type": "object",
               "properties": {
@@ -322,7 +336,7 @@ TOOLS = [
             }
           }
         },
-        "required": ["layer", "items"]
+        "required": ["layer"]
       }
     }
   },
@@ -387,19 +401,19 @@ DATA_TOOLS = [
     "type": "function",
     "function": {
       "name": "data_ng_annotations_from_data",
-      "description": "Create Neuroglancer annotation points/boxes/ellipsoids directly from dataframe rows. Each row becomes one annotation at the specified spatial coordinates. IMPORTANT: If you just called data_query_polars, use the returned summary_id (NOT the original file_id) to annotate the QUERY RESULT. Optionally use filter_expression to transform data inline.",
+      "description": "Create Neuroglancer annotation points/boxes/ellipsoids directly from dataframe rows. Each row becomes one annotation at the specified spatial coordinates. Use file_id for original uploaded data OR summary_id if annotating a previous query result that still has ALL needed columns. Use filter_expression to filter/transform data inline.",
       "parameters": {
         "type": "object",
         "properties": {
-          "file_id": {"type": "string", "description": "Source file id. Use this ONLY if annotating the full original dataset. If you just ran a query, use summary_id instead!"},
-          "summary_id": {"type": "string", "description": "ID of saved query result (returned by data_query_polars). Use 'last' to reference the most recent query. CRITICAL: Use this when creating annotations from filtered/aggregated data, not the original file_id!"},
+          "file_id": {"type": "string", "description": "Source file id from uploaded CSV. Use this to access the full original dataset with all columns. Preferred when you need columns that might have been excluded from aggregated queries."},
+          "summary_id": {"type": "string", "description": "ID of saved query result (returned by data_query_polars). Use 'last' to reference most recent query. ONLY use this if the query result still contains ALL columns needed (spatial coordinates + any filter columns). If unsure, use file_id instead."},
           "layer_name": {"type": "string", "description": "Name of annotation layer to create/add to"},
           "annotation_type": {"type": "string", "enum": ["point", "box", "ellipsoid"], "default": "point"},
           "center_columns": {"type": "array", "items": {"type": "string"}, "default": ["x", "y", "z"], "description": "Column names for x,y,z coordinates (e.g., ['centroid_x', 'centroid_y', 'centroid_z'])"},
           "size_columns": {"type": "array", "items": {"type": "string"}, "description": "For box/ellipsoid: column names for width,height,depth dimensions"},
           "id_column": {"type": "string", "description": "Optional: column to use for annotation IDs (e.g., 'cell_id')"},
           "color": {"type": "string", "description": "Hex color for layer (e.g., '#00ff00' for green, '#ff0000' for red)"},
-          "filter_expression": {"type": "string", "description": "Optional Polars expression to filter/transform data before creating annotations. Use 'df' for dataframe. Example: 'df.filter(pl.col(\"cluster_id\") == 3).head(10)' or 'df.group_by(\"cluster_label\").agg(pl.first(\"centroid_x\"), pl.first(\"centroid_y\"), pl.first(\"centroid_z\"), pl.max(\"log_volume\"))'"},
+          "filter_expression": {"type": "string", "description": "Optional Polars expression to filter/transform data before creating annotations. Use 'df' for dataframe. CRITICAL: All columns referenced in filter must exist in the source (file_id or summary_id). Example: 'df.filter(pl.col(\"cluster_id\") == 3).head(10)' or 'df.filter(pl.col(\"chan\") == 638).filter(pl.col(\"cell_id\") == 74330)'"},
           "limit": {"type": "integer", "default": 1000, "minimum": 1, "maximum": 5000, "description": "Maximum number of annotations to create"}
         },
         "required": ["layer_name"]
@@ -470,10 +484,10 @@ DATA_TOOLS = [
           "summary_id": {"type": "string", "description": "ID of a previously saved query result. Only use if you saved a result with save_as in a previous call. Do not provide both file_id and summary_id."},
           "expression": {
             "type": "string",
-            "description": "Polars expression to execute. Use 'df' to reference the dataframe and 'pl' for Polars functions. For aggregations, use df.select([pl.max('col')]) not df['col'].max(). Examples: 'df.filter(pl.col(\"age\") > 30).select([\"id\", \"name\"])' or 'df.select([pl.max(\"score\"), pl.mean(\"age\")])'"
+            "description": "Polars expression to execute. Use 'df' to reference the dataframe and 'pl' for Polars functions. IMPORTANT: For conditional logic, use pl.when().then().otherwise() (NOT pl.when().otherwise()). For aggregations, use df.select([pl.max('col')]) not df['col'].max(). Examples: 'df.filter(pl.col(\"age\") > 30).select([\"id\", \"name\"])' or 'df.select([pl.max(\"score\"), pl.mean(\"age\")])' or 'df.group_by(\"cluster\").agg(pl.sum(pl.when(pl.col(\"gene\")==\"Sst\").then(1).otherwise(0)).alias(\"sst_count\"))'"
           },
           "save_as": {"type": "string", "description": "Optional: save result as a named summary table for reuse in subsequent queries"},
-          "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 1000, "description": "Maximum rows to return"}
+          "limit": {"type": "integer", "default": 1000, "minimum": 1, "maximum": 10000, "description": "Maximum rows to return (default 1000)"}
         },
         "required": ["expression"]
       }

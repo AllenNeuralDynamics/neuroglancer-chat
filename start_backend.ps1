@@ -29,10 +29,11 @@ if ($Timing) {
 Set-Location "$PSScriptRoot\src\neurogabber"
 
 # If debug mode is enabled, set uvicorn log level to debug
+# Set limit-max-requests to 500MB for large CSV uploads
 if ($env:NEUROGABBER_DEBUG -eq "1") {
     Write-Host "Debug mode ENABLED - agent loop debug logging active" -ForegroundColor Magenta
-    uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-level debug
+    uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-level debug --limit-max-requests 10000 --timeout-keep-alive 300
 } else {
-    uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+    uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --limit-max-requests 10000 --timeout-keep-alive 300
 }
 Write-Host ""

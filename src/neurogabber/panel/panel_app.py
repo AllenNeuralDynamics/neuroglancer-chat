@@ -297,13 +297,24 @@ open_latest_btn = pn.widgets.Button(name="Open latest link", button_type="primar
 open_latest_btn.on_click(_open_latest)
 
 def _reset_app(_):
-    """Reset the application by reloading the page to get fresh frontend and backend state."""
+    """Reset the application by calling backend reset then reloading the page."""
     try:
         status.object = "🔄 Resetting application..."
-        logger.info("User requested app reset - reloading page")
+        logger.info("User requested app reset - clearing backend and reloading page")
         
-        # Simple solution: Just reload the page
-        # This gives a fresh Panel instance and the backend will reset conversation on next use
+        # First, reset the backend state
+        try:
+            with httpx.Client(timeout=10) as client:
+                resp = client.post(f"{BACKEND}/system/reset")
+                if resp.status_code != 200:
+                    status.object = f"❌ Backend reset failed: {resp.text}"
+                    return
+        except Exception as e:
+            logger.error(f"Failed to reset backend: {e}")
+            status.object = f"❌ Backend reset failed: {e}"
+            return
+        
+        # Then reload the page to get fresh frontend
         def do_reload():
             pn.state.location.reload = True
         
@@ -1637,20 +1648,39 @@ if pd is not None:
         layout="fit_columns",  # Stretch columns to fill available width
         buttons={
             'preview': "<i class='fa fa-eye' title='Preview file'></i>",
+            'delete': "<i class='fa fa-trash' title='Delete file'></i>",
         },
     )
     
-    # Add click handler for uploaded_table preview button
+    # Add click handler for uploaded_table preview and delete buttons
     def _on_uploaded_table_click(event):
-        if event.column == 'preview' and event.row is not None:
+        if event.row is not None:
             try:
                 df = uploaded_table.value
                 if df is not None and len(df) > event.row:
                     file_id = df.iloc[event.row].get('file_id')
-                    if file_id:
+                    if not file_id:
+                        return
+                    
+                    if event.column == 'preview':
                         _update_preview(file_id=file_id, is_summary=False)
+                    elif event.column == 'delete':
+                        # Delete the file
+                        try:
+                            with httpx.Client(timeout=10) as client:
+                                resp = client.post(f"{BACKEND}/delete_file", params={"file_id": file_id})
+                                rj = resp.json()
+                                if rj.get('ok'):
+                                    upload_notice.object = "✅ File deleted"
+                                    _refresh_files()
+                                    _refresh_summaries()
+                                else:
+                                    upload_notice.object = f"❌ Delete failed: {rj.get('error')}"
+                        except Exception as e:
+                            upload_notice.object = f"❌ Delete error: {e}"
+                            logger.error(f"Error deleting file: {e}")
             except Exception as e:
-                logger.error(f"Error handling preview click: {e}")
+                logger.error(f"Error handling table click: {e}")
     
     uploaded_table.on_click(_on_uploaded_table_click)
     
@@ -1711,13 +1741,14 @@ def _refresh_files():
         _update_upload_card_title(len(data))
         if data:
             df = pd.DataFrame(data)
-            # Add preview column
+            # Add preview and delete columns
             df['preview'] = ''
-            # Reorder with name first, preview at end, keep file_id (hidden)
-            desired = [c for c in ["name","size","n_rows","n_cols","preview","file_id"] if c in df.columns]
+            df['delete'] = ''
+            # Reorder with name first, action buttons at end, keep file_id (hidden)
+            desired = [c for c in ["name","size","n_rows","n_cols","preview","delete","file_id"] if c in df.columns]
             df = df[desired]
             # Rename display columns
-            rename_map = {"name":"Name","size":"Size","n_rows":"Rows","n_cols":"Cols","preview":"Preview"}
+            rename_map = {"name":"Name","size":"Size","n_rows":"Rows","n_cols":"Cols","preview":"Preview","delete":"Delete"}
             df = df.rename(columns=rename_map)
             uploaded_table.value = df
             # Hide file_id if present
@@ -1725,8 +1756,8 @@ def _refresh_files():
             if hidden_cols:
                 uploaded_table.hidden_columns = hidden_cols
             # Set column widths
-            uploaded_table.widths = {'Preview': 60}
-            uploaded_table.titles = {'Preview': 'Preview'}
+            uploaded_table.widths = {'Preview': 60, 'Delete': 60}
+            uploaded_table.titles = {'Preview': 'Preview', 'Delete': 'Delete'}
             # Dynamic height: ~40px per row (estimated row height incl. header). Cap at 5 rows.
             n_rows = len(df)
             per = 50
@@ -1808,13 +1839,11 @@ def _handle_file_upload(evt):
                 )
                 rj = resp.json()
 
-                # dont show response here
-                # if rj.get("ok"):
-                #     msgs.append(f"✅ {name} → {rj['file']['file_id']}")
-                # else:
-                #     msgs.append(f"❌ {name} error: {rj.get('error')}")
+                # Show only error messages, success is indicated by table refresh
+                if not rj.get("ok"):
+                    msgs.append(f"❌ {name}: {rj.get('error')}")
             except Exception as e:  # pragma: no cover
-                msgs.append(f"❌ {name} exception: {e}")
+                msgs.append(f"❌ {name}: {e}")
     upload_notice.object = "\n".join(msgs)
     _refresh_files()
     _refresh_summaries()
