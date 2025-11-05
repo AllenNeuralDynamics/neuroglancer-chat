@@ -597,7 +597,7 @@ def chat(req: ChatRequest):
         ]
         conversation = base_messages + [m.model_dump() for m in req.messages]
     
-    max_iters = 6
+    max_iters = 15  # Increased to support repetitive operations (e.g., multiple layers/annotations)
     overall_mutated = False
     tool_execution_records = []  # truncated records for response
     full_trace_steps = []  # full detail trace retained server-side

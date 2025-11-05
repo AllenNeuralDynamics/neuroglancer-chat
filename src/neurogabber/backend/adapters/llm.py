@@ -3,7 +3,7 @@ from typing import List, Dict
 from openai import OpenAI
 
 _API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")  # Configurable via env var
+#MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")  # Configurable via env var
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")  # Configurable via env var
 
 client = None
@@ -98,7 +98,63 @@ Example: "Annotate cell 74330 where chan==638"
    • Unsure what columns are in summary → default to file_id
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-�📚 WORKFLOW RECIPES - Common Task Patterns
+🔁 PARALLEL TOOL CALLING FOR REPETITIVE OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ CRITICAL: When you need to perform the same operation multiple times (e.g., for each gene, cluster, or value in a list), use PARALLEL TOOL CALLS to batch operations efficiently.
+
+STRATEGY:
+1. First, query the data to understand what you're iterating over (e.g., unique gene names)
+2. In the NEXT iteration, make PARALLEL tool calls (up to 5-8 at once) with different parameters
+3. If more remain, continue in subsequent iterations
+4. Use consistent naming patterns for layers/annotations
+
+Example: "For each gene in cell 74330, add annotation layer with gene name"
+
+❌ WRONG (Sequential, slow):
+   Iteration 1: ng_add_layer(name="Sst") + data_ng_annotations_from_data(layer="Sst", filter="gene==Sst")
+   Iteration 2: ng_add_layer(name="Vip") + data_ng_annotations_from_data(layer="Vip", filter="gene==Vip")
+   ... 7 more iterations ...
+   [Takes 9 iterations, may hit iteration limit]
+
+✅ CORRECT (Parallel batching):
+   Iteration 1: data_query_polars(expression="df.filter(pl.col('cell_id')==74330).select('gene').unique()")
+   → Returns: ["Sst", "Vip", "Pvalb", "Gad1", "Gad2", "Slc17a7", "Th", "Snap25", "Penk"]
+   
+   Iteration 2: Make 5 PARALLEL calls:
+     • ng_add_layer(name="Sst", layer_type="annotation", annotation_color="#ff0000")
+     • ng_add_layer(name="Vip", layer_type="annotation", annotation_color="#00ff00")
+     • ng_add_layer(name="Pvalb", layer_type="annotation", annotation_color="#0000ff")
+     • ng_add_layer(name="Gad1", layer_type="annotation", annotation_color="#ffff00")
+     • ng_add_layer(name="Gad2", layer_type="annotation", annotation_color="#ff00ff")
+   
+   Iteration 3: Make 4 PARALLEL calls:
+     • ng_add_layer(name="Slc17a7", layer_type="annotation", annotation_color="#00ffff")
+     • ng_add_layer(name="Th", layer_type="annotation", annotation_color="#ff8800")
+     • ng_add_layer(name="Snap25", layer_type="annotation", annotation_color="#8800ff")
+     • ng_add_layer(name="Penk", layer_type="annotation", annotation_color="#00ff88")
+   
+   Iteration 4: Make 9 PARALLEL calls (add annotations to all layers):
+     • data_ng_annotations_from_data(file_id="...", layer_name="Sst", filter_expression="df.filter((pl.col('cell_id')==74330) & (pl.col('gene')=='Sst'))")
+     • data_ng_annotations_from_data(file_id="...", layer_name="Vip", filter_expression="df.filter((pl.col('cell_id')==74330) & (pl.col('gene')=='Vip'))")
+     • ... [7 more parallel calls]
+   
+   [Completes in 4 iterations total]
+
+BATCHING GUIDELINES:
+• Make 5-8 parallel tool calls per iteration (OpenAI supports this natively)
+• For operations with 10+ items, split across 2-3 iterations
+• Always query/preview data first to know what you're iterating over
+• Use consistent color palettes: ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff", "#ff8800", "#8800ff", "#00ff88"]
+• For annotation layers, create layers first (iteration N), then add annotations (iteration N+1)
+
+COLOR ASSIGNMENT:
+• Use distinct colors for better visual separation
+• Cycle through standard palette: red, green, blue, yellow, magenta, cyan, orange, purple, teal
+• Keep color assignment consistent across related operations
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 WORKFLOW RECIPES - Common Task Patterns
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Recipe 1: ADD ANNOTATION POINTS FROM FILTERED/AGGREGATED DATA
