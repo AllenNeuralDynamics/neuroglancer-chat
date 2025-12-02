@@ -7,7 +7,7 @@ import os
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from neurogabber.backend.observability.timing import TimingCollector
+from neuroglancer_chat.backend.observability.timing import TimingCollector
 import time
 
 def test_timing():

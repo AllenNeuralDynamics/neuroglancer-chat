@@ -22,7 +22,7 @@ try:
         exit(1)
 except Exception as e:
     print(f"   ❌ ERROR: {e}")
-    print("   (Is the backend running? Try: uvicorn neurogabber.backend.main:app)")
+    print("   (Is the backend running? Try: uvicorn neuroglancer_chat.backend.main:app)")
     exit(1)
 
 # Test 2: Add annotation points

@@ -8,15 +8,15 @@ import pandas as pd
 import logging
 
 # Import pointer expansion functionality
-from neurogabber.backend.tools.pointer_expansion import (
+from neuroglancer_chat.backend.tools.pointer_expansion import (
     expand_if_pointer_and_generate_inline,
     is_pointer_url
 )
 
 # setup debug logging
 
-# Enable verbose debug logging when NEUROGABBER_DEBUG is set (1/true/yes)
-DEBUG_ENABLED = os.getenv("NEUROGABBER_DEBUG", "").lower() in ("1", "true", "yes")
+# Enable verbose debug logging when NEUROGLANCER_CHAT_DEBUG is set (1/true/yes)
+DEBUG_ENABLED = os.getenv("NEUROGLANCER_CHAT_DEBUG", "").lower() in ("1", "true", "yes")
 
 FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 def reconfig_basic_config(format_=FORMAT, level=None):
@@ -26,14 +26,14 @@ def reconfig_basic_config(format_=FORMAT, level=None):
     logging.basicConfig(format=format_, level=level, force=True)
     logging.info(f"Logging configured at {logging.getLevelName(level)} level")
     if DEBUG_ENABLED:
-        logging.warning("🔍 FRONTEND DEBUG MODE ENABLED (NEUROGABBER_DEBUG=1)")
+        logging.warning("🔍 FRONTEND DEBUG MODE ENABLED (NEUROGLANCER_CHAT_DEBUG=1)")
 
 reconfig_basic_config()
 logger = logging.getLogger(name="app")
 
 # get version from package metadata init
 from importlib.metadata import version
-version = version("neurogabber")
+version = version("neuroglancer-chat")
 pn.extension(
     'tabulator',
     'filedropper',

@@ -1,6 +1,6 @@
 """Test to compare current annotation implementation vs manual Neuroglancer schema."""
 import json
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
 
 # What Neuroglancer creates when you manually add a point
 MANUAL_NEUROGLANCER_SCHEMA = {

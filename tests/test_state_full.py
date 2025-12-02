@@ -1,6 +1,6 @@
 import copy
-from neurogabber.backend.tools.neuroglancer_state import from_url, to_url, NeuroglancerState
-from neurogabber.examples.ng_state_dict import STATE_DICT
+from neuroglancer_chat.backend.tools.neuroglancer_state import from_url, to_url, NeuroglancerState
+from neuroglancer_chat.examples.ng_state_dict import STATE_DICT
 
 
 def test_round_trip_full_state():

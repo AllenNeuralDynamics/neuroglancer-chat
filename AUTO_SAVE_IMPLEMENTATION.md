@@ -78,19 +78,19 @@ data_ng_annotations_from_data(
 
 ## Files Modified
 
-1. **src/neurogabber/backend/main.py**
+1. **src/neuroglancer_chat/backend/main.py**
    - Added `LAST_QUERY_SUMMARY_ID` global tracker
    - Modified `execute_query_polars()` to always auto-save results
    - Added `_resolve_summary_id()` helper function
    - Updated `data_ng_annotations_from_data` to use resolved summary_id
    - Enhanced response messages with chaining guidance
 
-2. **src/neurogabber/backend/adapters/llm.py**
+2. **src/neuroglancer_chat/backend/adapters/llm.py**
    - Added "QUERY RESULT CHAINING" section to system prompt
    - Updated workflow recipes with correct/incorrect patterns
    - Enhanced tool schema descriptions to emphasize summary_id usage
 
-3. **src/neurogabber/backend/storage/data.py**
+3. **src/neuroglancer_chat/backend/storage/data.py**
    - Added `max_summaries` parameter to `DataMemory`
    - Implemented LRU eviction with `summary_order` tracking
    - Auto-cleanup when summary limit reached
@@ -212,3 +212,4 @@ Possible improvements:
 - [ ] Test with original failing prompt
 - [ ] Monitor LLM behavior for correct summary_id usage
 - [ ] Update architecture docs if needed
+

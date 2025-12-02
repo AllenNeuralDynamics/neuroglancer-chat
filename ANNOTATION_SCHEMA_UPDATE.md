@@ -79,7 +79,7 @@ Added required Neuroglancer metadata fields:
 
 ## Files Modified
 
-### 1. `src/neurogabber/backend/tools/neuroglancer_state.py`
+### 1. `src/neuroglancer_chat/backend/tools/neuroglancer_state.py`
 
 #### `add_layer()` method:
 - Annotation layers now create proper source: `{url: "local://annotations"}`
@@ -91,7 +91,7 @@ Added required Neuroglancer metadata fields:
 - Auto-creates layer if it doesn't exist
 - Added docstring explaining schema
 
-### 2. `src/neurogabber/backend/main.py`
+### 2. `src/neuroglancer_chat/backend/main.py`
 
 #### `t_add_annotations()` endpoint:
 - Added `"type"` field to all annotation items
@@ -160,3 +160,4 @@ POST /tools/ng_annotations_add
 ```
 
 Annotations should now appear correctly in Neuroglancer! 🎉
+

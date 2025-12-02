@@ -29,8 +29,8 @@ import polars as pl
 
 import logging
 
-# Enable verbose debug logging when NEUROGABBER_DEBUG is set (1/true/yes)
-DEBUG_ENABLED = os.getenv("NEUROGABBER_DEBUG", "").lower() in ("1", "true", "yes")
+# Enable verbose debug logging when NEUROGLANCER_CHAT_DEBUG is set (1/true/yes)
+DEBUG_ENABLED = os.getenv("NEUROGLANCER_CHAT_DEBUG", "").lower() in ("1", "true", "yes")
 
 # Configure logging level based on debug flag
 log_level = logging.DEBUG if DEBUG_ENABLED else logging.INFO
@@ -69,9 +69,9 @@ app.state.max_upload_size = 500 * 1024 * 1024  # 500 MB
 
 # Log debug mode status on startup
 if DEBUG_ENABLED:
-    logger.warning("🔍 DEBUG MODE ENABLED - Verbose logging active (NEUROGABBER_DEBUG=1)")
+    logger.warning("🔍 DEBUG MODE ENABLED - Verbose logging active (NEUROGLANCER_CHAT_DEBUG=1)")
 else:
-    logger.info("Debug mode disabled. Set NEUROGABBER_DEBUG=1 to enable verbose logging.")
+    logger.info("Debug mode disabled. Set NEUROGLANCER_CHAT_DEBUG=1 to enable verbose logging.")
 
 # Configuration: Control what tool results the LLM sees
 # Set to False to hide query data from LLM (sends minimal acknowledgment instead)

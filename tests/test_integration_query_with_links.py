@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 # Locate the example CSV file
-EXAMPLE_CSV = Path(__file__).parent.parent / "src" / "neurogabber" / "examples" / "767018_inh_cells_shape_metrics_clusters.csv"
+EXAMPLE_CSV = Path(__file__).parent.parent / "src" / "neuroglancer_chat" / "examples" / "767018_inh_cells_shape_metrics_clusters.csv"
 BACKEND_URL = os.environ.get("BACKEND", "http://127.0.0.1:8000")
 
 

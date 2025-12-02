@@ -1,4 +1,4 @@
-# Start neurogabber backend only (for development)
+# Start neuroglancer-chat backend only (for development)
 # Usage: .\start_backend.ps1 [-Timing]
 
 param(
@@ -9,7 +9,7 @@ param(
 $env:BACKEND = "http://127.0.0.1:8000"
 
 # set debug
-$env:NEUROGABBER_DEBUG = "1"
+$env:NEUROGLANCER_CHAT_DEBUG = "1"
 
 
 # Start backend in foreground
@@ -26,11 +26,11 @@ if ($Timing) {
 }
 
 # Change to backend directory
-Set-Location "$PSScriptRoot\src\neurogabber"
+Set-Location "$PSScriptRoot\src\neuroglancer_chat"
 
 # If debug mode is enabled, set uvicorn log level to debug
 # Set limit-max-requests to 500MB for large CSV uploads
-if ($env:NEUROGABBER_DEBUG -eq "1") {
+if ($env:NEUROGLANCER_CHAT_DEBUG -eq "1") {
     Write-Host "Debug mode ENABLED - agent loop debug logging active" -ForegroundColor Magenta
     uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-level debug --limit-max-requests 10000 --timeout-keep-alive 300
 } else {

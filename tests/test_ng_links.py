@@ -1,7 +1,7 @@
 """Test automatic Neuroglancer link generation for spatial data."""
 import polars as pl
-from neurogabber.backend.main import _detect_spatial_columns, _generate_ng_links_for_rows
-from neurogabber.backend.main import CURRENT_STATE
+from neuroglancer_chat.backend.main import _detect_spatial_columns, _generate_ng_links_for_rows
+from neuroglancer_chat.backend.main import CURRENT_STATE
 
 
 def test_spatial_detection_xyz():
@@ -54,7 +54,7 @@ def test_ng_links_raw_urls():
     """Test that generated links are raw URLs without markdown wrapper."""
     # Set up a minimal CURRENT_STATE
     global CURRENT_STATE
-    from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState
+    from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
     
     if CURRENT_STATE is None:
         CURRENT_STATE = NeuroglancerState()

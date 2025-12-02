@@ -1,7 +1,7 @@
 """Test annotation color customization."""
 import json
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app, CURRENT_STATE
+from neuroglancer_chat.backend.main import app, CURRENT_STATE
 
 client = TestClient(app)
 
@@ -58,7 +58,7 @@ print("   ✅ Default color applied!")
 
 # Test 4: Via dispatcher (simulating LLM call)
 print("\n4. Creating blue annotation via dispatcher...")
-from neurogabber.backend.main import _execute_tool_by_name
+from neuroglancer_chat.backend.main import _execute_tool_by_name
 
 result = _execute_tool_by_name(
     "ng_add_layer",

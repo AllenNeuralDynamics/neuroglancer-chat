@@ -1,5 +1,5 @@
 """Test smart column truncation for wide tables."""
-from neurogabber.panel.panel_app import _truncate_table_columns
+from neuroglancer_chat.panel.panel_app import _truncate_table_columns
 
 # Test with a wide table
 wide_table = """Query results:

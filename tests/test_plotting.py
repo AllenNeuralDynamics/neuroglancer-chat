@@ -3,7 +3,7 @@ Tests for the plotting functionality.
 """
 import pytest
 import polars as pl
-from neurogabber.backend.tools.plotting import validate_plot_requirements, generate_plot
+from neuroglancer_chat.backend.tools.plotting import validate_plot_requirements, generate_plot
 
 
 def test_validate_plot_requirements_valid():

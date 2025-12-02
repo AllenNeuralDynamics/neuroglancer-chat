@@ -1,4 +1,4 @@
-# Neurogabber — Architecture (Enhanced MVP)
+# Neuroglancer-Chat — Architecture (Enhanced MVP)
 
 Concise overview of the current repo, data flow, in‑memory data/memory model, and roadmap. Updated after adding ephemeral CSV upload support, dataframe tools (Polars), conversational memory, and JSON pointer expansion with debounce functionality.
 
@@ -326,4 +326,5 @@ Current scope: small tool surface (<20), single round tool selection, explicit p
 
 ---
 Last updated: after data tools, memory integration, and JSON pointer expansion with debounce functionality.
+
 

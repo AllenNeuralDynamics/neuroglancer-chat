@@ -1,5 +1,5 @@
 """Debug table enhancement."""
-from neurogabber.panel.panel_app import _enhance_table_with_ng_views
+from neuroglancer_chat.panel.panel_app import _enhance_table_with_ng_views
 
 text = """Here are the results:
 

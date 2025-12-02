@@ -2,7 +2,7 @@
 
 ## Overview
 
-The neurogabber agent loop now includes comprehensive timing instrumentation to help identify performance bottlenecks and optimize response times. This feature captures detailed metrics at key points in the request lifecycle and provides both file-based logging and real-time monitoring.
+The neuroglancer_chat agent loop now includes comprehensive timing instrumentation to help identify performance bottlenecks and optimize response times. This feature captures detailed metrics at key points in the request lifecycle and provides both file-based logging and real-time monitoring.
 
 ## Features
 
@@ -396,7 +396,7 @@ Based on typical usage patterns:
 Main class for collecting timing data within the agent loop.
 
 ```python
-from neurogabber.backend.observability.timing import TimingCollector
+from neuroglancer_chat.backend.observability.timing import TimingCollector
 
 # Initialize
 timing = TimingCollector(user_prompt="your prompt here")
@@ -426,7 +426,7 @@ timing.finalize()  # Writes to file and stores in memory
 ### Helper Functions
 
 ```python
-from neurogabber.backend.observability.timing import (
+from neuroglancer_chat.backend.observability.timing import (
     get_recent_records,
     get_timing_stats
 )
@@ -527,3 +527,4 @@ For issues, questions, or feature requests related to timing:
 ---
 
 Last updated: 2025-10-17
+

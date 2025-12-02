@@ -1,4 +1,4 @@
-from neurogabber.backend.main import _synthesize_tool_call_message, _mask_ng_urls
+from neuroglancer_chat.backend.main import _synthesize_tool_call_message, _mask_ng_urls
 
 
 def test_synthesize_tool_call_message_includes_tools_only():

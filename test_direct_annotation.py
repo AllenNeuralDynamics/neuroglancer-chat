@@ -1,6 +1,6 @@
 """Direct test of what add_annotations creates."""
 import json
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
 
 state = NeuroglancerState()
 

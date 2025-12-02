@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document details how the LLM agent processes user queries, constructs prompts, manages conversation history, and executes tools in the Neurogabber system.
+This document details how the LLM agent processes user queries, constructs prompts, manages conversation history, and executes tools in the Neuroglancer-Chat system.
 
 ---
 
@@ -728,3 +728,4 @@ Total: 2 iterations, 2 tool calls (1 error)
 ✅ **History preserved** across turns for coherent conversation
 ✅ **Streaming support** for real-time user feedback
 ✅ **Observability** via tool traces and debug endpoints
+

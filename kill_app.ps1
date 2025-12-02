@@ -1,7 +1,7 @@
-# Kill all Neurogabber-related processes
+# Kill all Neuroglancer-Chat-related processes
 # This script stops the backend (uvicorn) and frontend (panel serve) processes
 
-Write-Host "Stopping Neurogabber processes..." -ForegroundColor Yellow
+Write-Host "Stopping Neuroglancer-Chat processes..." -ForegroundColor Yellow
 
 # Kill uvicorn processes (backend)
 $uvicornProcesses = Get-Process -Name "uvicorn" -ErrorAction SilentlyContinue
@@ -20,7 +20,7 @@ else
     Write-Host "  No uvicorn processes found" -ForegroundColor Gray
 }
 
-# Kill Python processes running neurogabber
+# Kill Python processes running neuroglancer-chat
 $pythonProcesses = Get-Process -Name "python" -ErrorAction SilentlyContinue
 if ($pythonProcesses)
 {
@@ -68,5 +68,5 @@ else
 }
 
 Write-Host ""
-Write-Host "All Neurogabber processes stopped!" -ForegroundColor Green
+Write-Host "All Neuroglancer-Chat processes stopped!" -ForegroundColor Green
 Write-Host "You can now restart the app with start_backend.ps1 and start_panel.ps1" -ForegroundColor Yellow

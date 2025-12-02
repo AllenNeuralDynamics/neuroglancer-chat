@@ -1,6 +1,6 @@
 import re
 
-file_path = r'c:\Users\matt.davis\code\neurogabber\src\neurogabber\backend\adapters\llm.py'
+file_path = r'c:\Users\matt.davis\code\neurogabber\src\neuroglancer_chat\backend\adapters\llm.py'
 
 with open(file_path, 'r', encoding='utf-8') as f:
     content = f.read()

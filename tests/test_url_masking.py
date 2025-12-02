@@ -1,4 +1,4 @@
-from neurogabber.backend.main import _mask_ng_urls
+from neuroglancer_chat.backend.main import _mask_ng_urls
 
 
 def test_mask_single_url():

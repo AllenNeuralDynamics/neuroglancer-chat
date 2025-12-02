@@ -2,7 +2,7 @@
 
 ## SEND_DATA_TO_LLM Flag
 
-**Location:** `src/neurogabber/backend/main.py` (line ~49)
+**Location:** `src/neuroglancer_chat/backend/main.py` (line ~49)
 
 **Purpose:** Controls whether the LLM receives full query data results or minimal acknowledgments.
 
@@ -79,14 +79,14 @@ centroid_z: 713
 
 **Option 1: Edit directly in code**
 ```python
-# In src/neurogabber/backend/main.py around line 49
+# In src/neuroglancer_chat/backend/main.py around line 49
 SEND_DATA_TO_LLM = False  # Change to True to send full data
 ```
 
 **Option 2: Environment variable (future enhancement)**
 ```bash
 # Add to .env file
-NEUROGABBER_SEND_DATA_TO_LLM=false
+neuroglancer_chat_SEND_DATA_TO_LLM=false
 ```
 
 ---
@@ -121,3 +121,4 @@ With `SEND_DATA_TO_LLM=True`:
 - ⚠️ LLM may include data summaries
 - ⚠️ LLM responses longer
 - ✅ LLM can reference specific values
+

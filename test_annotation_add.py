@@ -1,7 +1,7 @@
 """Test annotation adding to match your exact examples."""
 import json
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app, CURRENT_STATE
+from neuroglancer_chat.backend.main import app, CURRENT_STATE
 
 client = TestClient(app)
 

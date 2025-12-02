@@ -1,12 +1,12 @@
-# Neurogabber Architecture
+# Neuroglancer-Chat Architecture
 
 ## System Overview
 
-Neurogabber is a neuroimaging chat application that combines LLM-powered natural language interaction with Neuroglancer visualization and data analysis tools.
+Neuroglancer-Chat is a neuroimaging chat application that combines LLM-powered natural language interaction with Neuroglancer visualization and data analysis tools.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            NEUROGABBER SYSTEM                                │
+│                            Neuroglancer-Chat SYSTEM                                │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -198,31 +198,31 @@ Display in chat + "Add to Workspace" button
 
 ## Key Components
 
-### Frontend (`src/neurogabber/panel/`)
+### Frontend (`src/Neuroglancer-Chat/panel/`)
 - **panel_app.py**: Main Panel application
   - Chat interface with streaming support
   - Neuroglancer viewer integration
   - Workspace tabs (Results, Data Upload)
   - Settings controls
 
-### Backend (`src/neurogabber/backend/`)
+### Backend (`src/Neuroglancer-Chat/backend/`)
 - **main.py**: FastAPI server with endpoints
   - `/agent/chat`: Non-streaming chat
   - `/agent/chat/stream`: Server-Sent Events streaming
   - `/tools/*`: Direct tool endpoints
   - `/upload_file`: CSV file upload
 
-### Tools (`src/neurogabber/backend/tools/`)
+### Tools (`src/Neuroglancer-Chat/backend/tools/`)
 - **neuroglancer_state.py**: NG state management (dimension order preserved!)
 - **io.py**: Data query and filtering tools
 - **plots.py**: Plot generation and validation
 - **pointer_expansion.py**: JSON pointer URL expansion
 
-### Storage (`src/neurogabber/backend/storage/`)
+### Storage (`src/Neuroglancer-Chat/backend/storage/`)
 - **data.py**: In-memory DataMemory store
 - **states.py**: Global CURRENT_STATE
 
-### Adapters (`src/neurogabber/backend/adapters/`)
+### Adapters (`src/Neuroglancer-Chat/backend/adapters/`)
 - **llm.py**: OpenAI integration with tool schemas
 
 ## Critical Design Patterns
@@ -257,7 +257,7 @@ Display in chat + "Add to Workspace" button
 ### Environment Variables
 - `BACKEND`: Backend URL (default: http://127.0.0.1:8000)
 - `USE_STREAMING`: Enable streaming chat (default: true)
-- `NEUROGABBER_DEBUG`: Enable debug logging
+- `Neuroglancer-Chat_DEBUG`: Enable debug logging
 - `NEUROGLANCER_BASE`: NG base URL (default: neuroglancer-demo.appspot.com)
 - `OPENAI_API_KEY`: OpenAI API key for LLM
 
@@ -292,3 +292,4 @@ Display in chat + "Add to Workspace" button
 - Comprehensive error responses with structured messages
 - Trace history for debugging tool execution
 - Pointer expansion for secure JSON state sharing
+

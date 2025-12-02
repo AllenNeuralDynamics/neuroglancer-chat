@@ -1,7 +1,7 @@
 """Integration test for Phase 2: ng_views in backend response and frontend rendering."""
 import re
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app
+from neuroglancer_chat.backend.main import app
 
 client = TestClient(app)
 
@@ -58,7 +58,7 @@ def test_ng_views_in_chat_response():
 def test_frontend_table_enhancement():
     """Test the frontend's table enhancement function."""
     # Import the function
-    from neurogabber.panel.panel_app import _enhance_table_with_ng_views
+    from neuroglancer_chat.panel.panel_app import _enhance_table_with_ng_views
     
     # Sample markdown table
     text = """Here are the results:

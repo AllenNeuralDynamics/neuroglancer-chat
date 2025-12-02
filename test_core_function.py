@@ -4,7 +4,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 # Import the core function (no FastAPI required!)
-from neurogabber.backend.main import execute_query_polars, DATA_MEMORY
+from neuroglancer_chat.backend.main import execute_query_polars, DATA_MEMORY
 import polars as pl
 
 print("=" * 70)

@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 import jsonschema
-from neurogabber.backend.adapters.llm import TOOLS
+from neuroglancer_chat.backend.adapters.llm import TOOLS
 
 
 def _walk_schema(schema: Dict[str, Any]):

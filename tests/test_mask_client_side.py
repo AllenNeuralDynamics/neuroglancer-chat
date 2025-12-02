@@ -1,5 +1,5 @@
 """Test that _mask_client_side doesn't double-wrap markdown links."""
-from neurogabber.panel.panel_app import _mask_client_side
+from neuroglancer_chat.panel.panel_app import _mask_client_side
 
 # Test 1: Raw URL should be masked
 text1 = "Check this link: https://neuroglancer-demo.appspot.com#!{'layers':[]}"

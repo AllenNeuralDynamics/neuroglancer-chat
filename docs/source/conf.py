@@ -10,7 +10,7 @@ from datetime import date
 from os.path import abspath, dirname
 from pathlib import Path
 
-from neurogabber import __version__ as package_version
+from neuroglancer_chat import __version__ as package_version
 
 INSTITUTE_NAME = "Allen Institute for Neural Dynamics"
 

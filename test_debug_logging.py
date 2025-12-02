@@ -3,10 +3,10 @@ import os
 import logging
 
 # Set debug mode
-os.environ["NEUROGABBER_DEBUG"] = "1"
+os.environ["NEUROGLANCER_CHAT_DEBUG"] = "1"
 
-# Enable verbose debug logging when NEUROGABBER_DEBUG is set (1/true/yes)
-DEBUG_ENABLED = os.getenv("NEUROGABBER_DEBUG", "").lower() in ("1", "true", "yes")
+# Enable verbose debug logging when NEUROGLANCER_CHAT_DEBUG is set (1/true/yes)
+DEBUG_ENABLED = os.getenv("NEUROGLANCER_CHAT_DEBUG", "").lower() in ("1", "true", "yes")
 
 # Configure logging level based on debug flag
 log_level = logging.DEBUG if DEBUG_ENABLED else logging.INFO
@@ -35,7 +35,7 @@ print("="*60 + "\n")
 
 # Log debug mode status
 if DEBUG_ENABLED:
-    logger.warning("🔍 DEBUG MODE ENABLED - Verbose logging active (NEUROGABBER_DEBUG=1)")
+    logger.warning("\ud83d\udd0d DEBUG MODE ENABLED - Verbose logging active (NEUROGLANCER_CHAT_DEBUG=1)")
 else:
     logger.info("Debug mode disabled.")
 

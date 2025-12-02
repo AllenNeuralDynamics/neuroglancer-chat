@@ -203,20 +203,20 @@ User → LLM → data_ng_annotations_from_data(with filter_expression)
 
 ## Files Modified
 
-1. **src/neurogabber/backend/models.py**
+1. **src/neuroglancer_chat/backend/models.py**
    - Added `NgAnnotationsFromData` Pydantic model
 
-2. **src/neurogabber/backend/main.py**
+2. **src/neuroglancer_chat/backend/main.py**
    - Added `t_data_ng_annotations_from_data()` endpoint implementation
    - Added dispatcher case for the new tool
    - Added import for new model
 
-3. **src/neurogabber/backend/adapters/llm.py**
+3. **src/neuroglancer_chat/backend/adapters/llm.py**
    - Enhanced system prompt with Polars syntax warning box
    - Added workflow recipe book section
    - Added tool schema for `data_ng_annotations_from_data`
 
-4. **src/neurogabber/backend/tools/constants.py**
+4. **src/neuroglancer_chat/backend/tools/constants.py**
    - Added `data_ng_annotations_from_data` to `MUTATING_TOOLS`
 
 ## Future Enhancements
@@ -296,3 +296,4 @@ data_ng_annotations_from_data(
 - Clear chat history and start new conversation
 - Explicitly mention "use the new annotation tool"
 - System prompt changes take effect immediately (no cache warming needed)
+

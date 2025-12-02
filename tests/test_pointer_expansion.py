@@ -7,7 +7,7 @@ import pytest
 from unittest.mock import Mock, patch
 from typing import Dict, Any
 
-from neurogabber.backend.tools.pointer_expansion import (
+from neuroglancer_chat.backend.tools.pointer_expansion import (
     expand_if_pointer_and_generate_inline,
     is_pointer_url,
     resolve_neuroglancer_pointer,

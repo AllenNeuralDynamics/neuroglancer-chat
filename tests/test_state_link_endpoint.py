@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app, to_url, CURRENT_STATE
+from neuroglancer_chat.backend.main import app, to_url, CURRENT_STATE
 
 client = TestClient(app)
 
@@ -16,6 +16,6 @@ def test_ng_state_link_endpoint_returns_masked():
 def test_mask_fragment_only():
     # Simulate fragment-only situation
     frag = to_url(CURRENT_STATE).split('/',3)[-1]  # get the #!%7B...
-    from neurogabber.backend.main import _mask_ng_urls
+    from neuroglancer_chat.backend.main import _mask_ng_urls
     masked = _mask_ng_urls(frag)
     assert 'Updated Neuroglancer view' in masked

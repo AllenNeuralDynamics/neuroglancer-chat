@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app
+from neuroglancer_chat.backend.main import app
 
 client = TestClient(app)
 

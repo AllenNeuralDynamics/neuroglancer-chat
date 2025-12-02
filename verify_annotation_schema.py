@@ -2,7 +2,7 @@
 Test to verify our annotation schema matches the manual Neuroglancer example.
 """
 import json
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
 
 # Create annotation layer
 state = NeuroglancerState()

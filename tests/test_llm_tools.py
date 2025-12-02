@@ -1,6 +1,6 @@
 import re
 
-from neurogabber.backend.adapters import llm
+from neuroglancer_chat.backend.adapters import llm
 
 
 def test_tool_names_are_underscored_and_valid():

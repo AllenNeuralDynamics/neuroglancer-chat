@@ -1,11 +1,11 @@
-# Start neurogabber panel frontend only (for development)
+# Start neuroglancer-chat panel frontend only (for development)
 # Usage: .\start_panel.ps1 [-NoStreaming]
 
 param(
     [switch]$Streaming
 )
 
-Write-Host "Starting neurogabber panel frontend..." -ForegroundColor Cyan
+Write-Host "Starting neuroglancer-chat panel frontend..." -ForegroundColor Cyan
 
 # Set backend URL
 $env:BACKEND = "http://127.0.0.1:8000"
@@ -23,7 +23,7 @@ if ($Streaming) {
 }
 
 # Change to panel directory
-Set-Location "$PSScriptRoot\src\neurogabber"
+Set-Location "$PSScriptRoot\src\neuroglancer_chat"
 
 # Start panel in foreground
 Write-Host ""

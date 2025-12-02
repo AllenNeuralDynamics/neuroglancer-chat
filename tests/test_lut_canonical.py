@@ -1,4 +1,4 @@
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
 
 
 def test_set_lut_creates_normalized_range():
