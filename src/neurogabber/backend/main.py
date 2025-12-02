@@ -87,6 +87,61 @@ _TRACE_HISTORY_MAX = 50
 LAST_QUERY_SUMMARY_ID = None  # Track most recent query result for easy reference
 
 
+def _translate_pandas_to_polars(expression: str) -> str:
+    """Auto-translate common pandas syntax to Polars.
+    
+    This allows the LLM to use familiar pandas patterns while we use Polars internally.
+    Keeps all the performance benefits of Polars without confusing the model.
+    
+    Args:
+        expression: Python expression string (potentially with pandas syntax)
+    
+    Returns:
+        Expression with pandas patterns converted to Polars equivalents
+    """
+    # Replace method names (word boundaries to avoid partial matches)
+    import re
+    
+    # DataFrame methods
+    expression = re.sub(r'\.groupby\(', '.group_by(', expression)
+    expression = re.sub(r'\.distinct\(\)', '.unique()', expression)
+    
+    # Parameter names in method calls
+    expression = re.sub(r'\breverse=True\b', 'descending=True', expression)
+    expression = re.sub(r'\breverse=False\b', 'descending=False', expression)
+    
+    # Aggregation method names
+    expression = re.sub(r'\.agg\(', '.agg(', expression)  # Already compatible, but for completeness
+    
+    # CRITICAL: Convert pandas-style boolean indexing to Polars .filter()
+    # Pattern: df[df['col'] op value] → df.filter(pl.col('col') op value)
+    # Handles: ==, !=, >, <, >=, <=
+    # Simple single condition
+    simple_pattern = r"df\[df\['(\w+)'\]\s*(==|!=|>|<|>=|<=)\s*([^\]]+)\]"
+    expression = re.sub(
+        simple_pattern,
+        r"df.filter(pl.col('\1') \2 \3)",
+        expression
+    )
+    
+    # Complex with parentheses: df[(df['a']==1) & (df['b']==2)]
+    # First convert inner conditions: df['col'] op val → pl.col('col') op val
+    complex_inner_pattern = r"df\['(\w+)'\]\s*(==|!=|>|<|>=|<=)\s*([^\)&|]+)"
+    expression = re.sub(
+        complex_inner_pattern,
+        r"pl.col('\1') \2 \3",
+        expression
+    )
+    
+    # Then wrap in .filter() if still using df[...] notation
+    if 'df[' in expression and 'pl.col' in expression:
+        # df[(pl.col...)] → df.filter(pl.col...)
+        expression = re.sub(r'df\[\((.+)\)\]', r'df.filter(\1)', expression)
+        expression = re.sub(r'df\[([^\[\]]+)\]', r'df.filter(\1)', expression)
+    
+    return expression
+
+
 def _detect_spatial_columns(df) -> tuple[list[str], str] | None:
     """Detect spatial coordinate columns in a dataframe.
     
@@ -389,10 +444,12 @@ def _data_context_block(max_files: int = 10, max_summaries: int = 10) -> str:
                 spatial_note = ""
                 if spatial_info:
                     spatial_cols, pattern = spatial_info
-                    spatial_note = f" [HAS SPATIAL COLS: {', '.join(spatial_cols)} - include these in queries for auto NG links]"
-                parts.append(f"Most recent file (use this by default): file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}{spatial_note}")
+                    spatial_note = f" [HAS SPATIAL COLS: {', '.join(spatial_cols)}]"
+                parts.append(f"Primary data file: file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}{spatial_note}")
+                parts.append(f"→ For operations (annotations, plots, views): use file_id='{most_recent['file_id']}' with optional filter_expression")
             except:
-                parts.append(f"Most recent file (use this by default): file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}")
+                parts.append(f"Primary data file: file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}")
+                parts.append(f"→ For operations (annotations, plots, views): use file_id='{most_recent['file_id']}' with optional filter_expression")
         
         if len(files) > 1:
             parts.append("Other files:")
@@ -401,11 +458,9 @@ def _data_context_block(max_files: int = 10, max_summaries: int = 10) -> str:
     else:
         parts.append("Files: (none)")
     if sums:
-        parts.append("Summaries:")
-        for s in sums:
+        parts.append("Query results (for preview only, not for operations):")
+        for s in sums[:3]:  # Limit to 3 most recent to reduce noise
             parts.append(f"- {s['summary_id']} from {s['source_file_id']} kind={s['kind']} rows={s['n_rows']} cols={s['n_cols']}")
-    else:
-        parts.append("Summaries: (none)")
     mem = INTERACTION_MEMORY.recall()
     if mem:
         parts.append(f"Recent interactions: {mem}")
@@ -613,6 +668,34 @@ def chat(req: ChatRequest):
     for iteration in range(max_iters):
         iter_timing = timing.start_iteration(iteration)
         
+        # Inject iteration tracking as ephemeral system message (after first iteration)
+        if iteration > 0:
+            prev_summary_parts = []
+            
+            # Summarize what happened in previous iteration
+            if tool_execution_records:
+                last_tools = [rec["tool"] for rec in tool_execution_records[-3:]]  # Last 3 tools
+                prev_summary_parts.append(f"Previous tools: {', '.join(last_tools)}")
+            
+            # Check if last tool had an error
+            if conversation and conversation[-1].get("role") == "tool":
+                last_tool_content = conversation[-1].get("content", "")
+                try:
+                    import json as _json
+                    last_result = _json.loads(last_tool_content)
+                    if isinstance(last_result, dict) and "error" in last_result:
+                        prev_summary_parts.append(f"⚠️ Last tool had error - apply fix and retry")
+                except:
+                    pass
+            
+            iter_context = " | ".join(prev_summary_parts) if prev_summary_parts else "Continuing"
+            
+            iter_msg = {
+                "role": "system",
+                "content": f"🔄 Iteration {iteration+1}/{max_iters} | {iter_context}\n\nReminder: If there was an error, make a corrected tool call now (no explanation)."
+            }
+            conversation.append(iter_msg)
+        
         _dbg(f"Iteration {iteration} start; messages so far={len(conversation)}")
         
         # LLM call with timing
@@ -695,12 +778,15 @@ def chat(req: ChatRequest):
                     # Optionally hide data from LLM to prevent it from summarizing
                     if not SEND_DATA_TO_LLM:
                         # Replace result_payload with minimal acknowledgment for LLM
+                        # CRITICAL: Include summary_id and spatial_columns so agent can use data_ng_annotations_from_data
                         result_payload = {
                             "ok": True,
                             "rows": result_payload["rows"],
                             "columns": result_payload["columns"],
                             "expression": result_payload.get("expression"),
-                            "message": "✅ Query executed successfully. Data is being rendered in an interactive table widget. Do NOT format, display, or summarize the data - it's already handled by the frontend."
+                            "summary_id": result_payload.get("summary_id"),  # Required for annotations!
+                            "spatial_columns": result_payload.get("spatial_columns"),  # Indicates spatial data
+                            "message": "✅ Query executed successfully. Result saved as summary. If the user requested annotations or plots, continue with those tools using this summary_id."
                         }
                         _dbg(f"📦 Sending minimal acknowledgment to LLM (SEND_DATA_TO_LLM=False)")
                 else:
@@ -946,6 +1032,57 @@ def debug_logging_check():
         "logger_level": logging.getLevelName(logger.level),
         "root_logger_level": logging.getLevelName(logging.getLogger().level),
         "message": "Check your backend console for 5 log messages (1 print + 4 logs)"
+    }
+
+
+@app.post("/debug/next-prompt")
+def debug_next_prompt(req: ChatRequest):
+    """Show the full prompt that would be sent to the agent for the next message.
+    
+    This endpoint mimics the prompt assembly from /agent/chat but doesn't call the LLM.
+    Useful for debugging what context the agent sees.
+    
+    Args:
+        req: ChatRequest with conversation history (same format as /agent/chat)
+    
+    Returns:
+        JSON with the full assembled prompt including:
+        - System prompt
+        - State summary
+        - Data context
+        - Conversation history
+        - Character counts
+    """
+    # Assemble prompt exactly like /agent/chat does
+    state_summary = _summarize_state(CURRENT_STATE)
+    data_context = _data_context_block()
+    
+    base_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"Current viewer state summary:\n{state_summary}"},
+        {"role": "system", "content": data_context},
+    ]
+    conversation = base_messages + [m.model_dump() for m in req.messages]
+    
+    # Calculate character counts
+    system_prompt_chars = len(SYSTEM_PROMPT)
+    state_summary_chars = len(state_summary)
+    data_context_chars = len(data_context)
+    conversation_history_chars = sum(len(str(m.get("content", ""))) for m in [m.model_dump() for m in req.messages])
+    total_chars = system_prompt_chars + state_summary_chars + data_context_chars + conversation_history_chars
+    
+    return {
+        "messages": conversation,
+        "message_count": len(conversation),
+        "character_counts": {
+            "system_prompt": system_prompt_chars,
+            "state_summary": state_summary_chars,
+            "data_context": data_context_chars,
+            "conversation_history": conversation_history_chars,
+            "total": total_chars
+        },
+        "estimated_tokens": total_chars // 4,  # Rough estimate: 4 chars per token
+        "note": "This is what would be sent to the LLM on the next message"
     }
 
 
@@ -1339,6 +1476,13 @@ def execute_query_polars(
     except Exception as e:
         return {"error": f"Failed to load dataframe: {e}"}
     
+    # Auto-translate pandas syntax to Polars before execution
+    # This allows the LLM to use familiar pandas patterns while we use Polars internally
+    original_expression = expression
+    expression = _translate_pandas_to_polars(expression)
+    if expression != original_expression:
+        _dbg(f"Auto-translated: {original_expression[:80]} → {expression[:80]}")
+    
     # Execute in restricted namespace (only Polars, no builtins)
     namespace = {
         'pl': pl,
@@ -1445,6 +1589,16 @@ def execute_query_polars(
     except SyntaxError as e:
         _dbg(f"SyntaxError in expression: {e}")
         return {"error": f"Syntax error in expression: {e}"}
+    except AttributeError as e:
+        _dbg(f"AttributeError in expression: {e}")
+        error_str = str(e)
+        # Provide explicit fix for common Polars syntax errors
+        if "has no attribute 'groupby'" in error_str or "'groupby'" in error_str:
+            return {"error": f"Polars syntax error: {e}. Fix: Use group_by() NOT groupby(). Example: df.group_by('cell_id').agg(pl.first('x'))"}
+        elif "has no attribute 'distinct'" in error_str or "'distinct'" in error_str:
+            return {"error": f"Polars syntax error: {e}. Fix: Use .unique() NOT .distinct(). Example: df.select(pl.col('gene').unique())"}
+        else:
+            return {"error": f"AttributeError: {e}. Check Polars syntax - use group_by (not groupby), unique() (not distinct()), descending=True (not reverse=True)"}
     except Exception as e:
         _dbg(f"Exception executing expression: {type(e).__name__}: {e}")
         return {"error": f"Expression execution failed: {type(e).__name__}: {e}"}
@@ -1628,19 +1782,15 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
     
     # Validate inputs
     if not file_id and not summary_id:
-        # Auto-select: prefer most recent query result, fallback to most recent file
-        if LAST_QUERY_SUMMARY_ID:
-            summary_id = LAST_QUERY_SUMMARY_ID
-            _dbg(f"Auto-selected most recent query result: {summary_id}")
+        # Always default to most recent file (never auto-select summary_id)
+        files = DATA_MEMORY.list_files()
+        if files:
+            file_id = files[-1]["file_id"]
+            _dbg(f"No file_id or summary_id provided, defaulting to most recent file: {file_id}")
         else:
-            files = DATA_MEMORY.list_files()
-            if files:
-                file_id = files[-1]["file_id"]
-                _dbg(f"No recent query, auto-selected most recent file: {file_id}")
-            else:
-                error_msg = "No file_id or summary_id provided and no files uploaded"
-                logger.error(f"data_ng_annotations_from_data error: {error_msg}")
-                return {"error": error_msg}
+            error_msg = "No file_id provided and no files uploaded"
+            logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+            return {"error": error_msg}
     
     if file_id and summary_id:
         error_msg = "Provide either file_id OR summary_id, not both"
@@ -1660,6 +1810,12 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
         
         # Apply filter expression if provided
         if filter_expression:
+            # Auto-translate pandas syntax to Polars
+            original_filter = filter_expression
+            filter_expression = _translate_pandas_to_polars(filter_expression)
+            if filter_expression != original_filter:
+                _dbg(f"Auto-translated filter: {original_filter[:80]} → {filter_expression[:80]}")
+            
             _dbg(f"Applying filter_expression: {filter_expression[:200]}")
             try:
                 namespace = {'pl': pl, 'df': df, '__builtins__': {}}
@@ -1677,6 +1833,16 @@ def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
                     return {"error": error_msg}
             except Exception as e:
                 error_msg = f"filter_expression failed: {e}"
+                
+                # Check if it's a boolean indexing error and provide helpful guidance
+                error_str = str(e)
+                if "expected" in error_str and "values when selecting columns by boolean mask" in error_str:
+                    error_msg += "\n\n💡 TIP: Use Polars .filter() syntax for filtering:"
+                    error_msg += "\n  ✅ CORRECT: df.filter(pl.col('gene') == 'Calb2')"
+                    error_msg += "\n  ✅ CORRECT: df.filter((pl.col('a') > 5) & (pl.col('b') == 'x'))"
+                    error_msg += "\n  ❌ WRONG: df[df['gene'] == 'Calb2']  # pandas-style doesn't work"
+                    error_msg += "\n\nNote: Auto-translation should handle this, but explicit Polars syntax is preferred."
+                
                 logger.error(f"data_ng_annotations_from_data error: {error_msg}")
                 _dbg(f"Filter expression error details: {type(e).__name__}: {e}")
                 return {"error": error_msg}
@@ -1887,6 +2053,12 @@ def execute_plot(
     
     # Apply expression if provided
     if expression:
+        # Auto-translate pandas syntax to Polars
+        original_expr = expression
+        expression = _translate_pandas_to_polars(expression)
+        if expression != original_expr:
+            _dbg(f"Auto-translated plot expression: {original_expr[:80]} → {expression[:80]}")
+        
         _dbg(f"Applying expression before plotting: {expression[:100]}")
         try:
             namespace = {'pl': pl, 'df': df, '__builtins__': {}}

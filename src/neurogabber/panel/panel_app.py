@@ -223,6 +223,7 @@ update_state_interval = pn.widgets.IntInput(name="Update state interval (sec)", 
 trace_history_checkbox = pn.widgets.Checkbox(name="Trace history", value=True)
 trace_history_length = pn.widgets.IntInput(name="History N", value=5)
 trace_download = pn.widgets.FileDownload(label="Download traces", filename="trace_history.json", button_type="primary", disabled=True)
+debug_prompt_btn = pn.widgets.Button(name="Debug Next Prompt", button_type="warning")
 _trace_history: list[dict] = []
 _recent_traces_view = pn.pane.Markdown("No traces yet.", sizing_mode="stretch_width")
 _recent_traces_accordion = pn.Accordion(("Recent Traces", _recent_traces_view), active=[])
@@ -479,8 +480,12 @@ async def _handle_url_change_immediate(url: str):
 
 # Watch the Neuroglancer widget URL; use its built-in Demo/Load buttons
 viewer.param.watch(_on_url_change, 'url')
-async def agent_call(prompt: str) -> dict:
+async def agent_call(prompt: str, history: list = None) -> dict:
     """Call backend iterative chat once; backend executes tools.
+
+    Args:
+        prompt: Current user message
+        history: Previous conversation messages (list of ChatMessage dicts)
 
     Returns:
       answer: final assistant message (enhanced with View column if ng_views present)
@@ -489,7 +494,10 @@ async def agent_call(prompt: str) -> dict:
       ng_views: structured list of {row_index, url} if spatial query was executed
     """
     async with httpx.AsyncClient(timeout=120) as client:
-        chat_payload = {"messages": [{"role": "user", "content": prompt}]}
+        # Build messages list: history + current prompt
+        messages = history or []
+        messages.append({"role": "user", "content": prompt})
+        chat_payload = {"messages": messages}
         resp = await client.post(f"{BACKEND}/agent/chat", json=chat_payload)
         data = resp.json()
         answer = None
@@ -962,6 +970,60 @@ async def _update_trace_history():
         status.object += f" | Trace err: {e}"
 
 
+def _debug_next_prompt(event):
+    """Debug handler: Show the full prompt that would be sent to the agent next."""
+    try:
+        # Extract conversation history from ChatInterface
+        history = []
+        if hasattr(chat, 'serialize'):
+            for msg in chat.serialize():
+                if msg.get('role') in ['user', 'assistant']:
+                    history.append({
+                        'role': msg['role'],
+                        'content': msg.get('object', '') if isinstance(msg.get('object'), str) else str(msg.get('object', ''))
+                    })
+        
+        # Call debug endpoint
+        import httpx
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(
+                f"{BACKEND}/debug/next-prompt",
+                json={"messages": history}
+            )
+            data = resp.json()
+            
+            # Save to file
+            from datetime import datetime
+            import json
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"debug_next_prompt_{ts}.json"
+            filepath = os.path.join(os.path.expanduser("~"), "Desktop", filename)
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            status.object = f"✅ Debug prompt saved to {filename}"
+            print(f"\n{'='*80}")
+            print(f"DEBUG NEXT PROMPT - saved to: {filepath}")
+            print(f"{'='*80}")
+            print(f"Message count: {data['message_count']}")
+            print(f"Total characters: {data['character_counts']['total']:,}")
+            print(f"Estimated tokens: {data['estimated_tokens']:,}")
+            print(f"\nBreakdown:")
+            print(f"  System prompt: {data['character_counts']['system_prompt']:,} chars")
+            print(f"  State summary: {data['character_counts']['state_summary']:,} chars")
+            print(f"  Data context: {data['character_counts']['data_context']:,} chars")
+            print(f"  Conversation history: {data['character_counts']['conversation_history']:,} chars")
+            print(f"{'='*80}\n")
+            
+    except Exception as e:
+        logger.exception("Debug prompt failed")
+        status.object = f"❌ Debug prompt failed: {e}"
+
+
+debug_prompt_btn.on_click(_debug_next_prompt)
+
+
 def _create_workspace_button_for_query(query_data: dict):
     """Create workspace button for query results with closure.
     
@@ -1152,7 +1214,7 @@ async def respond_streaming(contents: str, user: str, **kwargs):
     Args:
         contents: User message text
         user: User identifier
-        **kwargs: Additional chat parameters
+        **kwargs: Additional chat parameters (includes 'instance' with ChatInterface reference)
     
     Yields:
         Chat message content (text, markdown, or Panel components)
@@ -1173,8 +1235,23 @@ async def respond_streaming(contents: str, user: str, **kwargs):
         event_count = 0
         response_usage = {}
         
+        # Extract conversation history from ChatInterface instance
+        history = []
+        instance = kwargs.get('instance')
+        if instance and hasattr(instance, 'serialize'):
+            # Get serialized messages and convert to API format
+            for msg in instance.serialize():
+                if msg.get('role') in ['user', 'assistant']:
+                    history.append({
+                        'role': msg['role'],
+                        'content': msg.get('object', '') if isinstance(msg.get('object'), str) else str(msg.get('object', ''))
+                    })
+        
         async with httpx.AsyncClient(timeout=120) as client:
-            chat_payload = {"messages": [{"role": "user", "content": contents}]}
+            # Build messages list: history + current prompt
+            messages = history
+            messages.append({"role": "user", "content": contents})
+            chat_payload = {"messages": messages}
             
             async with client.stream(
                 "POST",
@@ -1288,7 +1365,7 @@ async def respond_non_streaming(contents: str, user: str, **kwargs):
     Args:
         contents: User message text
         user: User identifier
-        **kwargs: Additional chat parameters
+        **kwargs: Additional chat parameters (includes 'instance' with ChatInterface reference)
     
     Yields:
         Chat message content (text, markdown, or Panel components)
@@ -1301,7 +1378,19 @@ async def respond_non_streaming(contents: str, user: str, **kwargs):
     _update_agent_status(state="🟡", tools=[])
     
     try:
-        result = await agent_call(contents)
+        # Extract conversation history from ChatInterface instance
+        history = []
+        instance = kwargs.get('instance')
+        if instance and hasattr(instance, 'serialize'):
+            # Get serialized messages and convert to API format
+            for msg in instance.serialize():
+                if msg.get('role') in ['user', 'assistant']:
+                    history.append({
+                        'role': msg['role'],
+                        'content': msg.get('object', '') if isinstance(msg.get('object'), str) else str(msg.get('object', ''))
+                    })
+        
+        result = await agent_call(contents, history=history)
         link = result.get("url")
         mutated = bool(result.get("mutated"))
         safe_answer = _mask_client_side(result.get("answer")) if result.get("answer") else None
@@ -1428,93 +1517,102 @@ async def respond_non_streaming(contents: str, user: str, **kwargs):
                 else:
                     yield pn.Column(embedded_table_component, sizing_mode="stretch_width")
             
-            # Render query_data as Tabulator
-            elif query_data and isinstance(query_data, dict) and query_data.get("data"):
-                logger.info(f"✅ Rendering Tabulator from query_data: {query_data.get('rows')} rows")
+            # Render query_data and/or plot_data
+            elif query_data or plot_data:
+                components_to_yield = []
                 
-                # Check if we also have plot_data
-                tabulator_widget = None
-                if plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
-                    if not show_query_tables.value:
-                        logger.info("Skipping query table rendering because plot_data is present and show_query_tables=False")
+                # Render query_data as Tabulator (if present)
+                if query_data and isinstance(query_data, dict) and query_data.get("data"):
+                    logger.info(f"✅ Rendering Tabulator from query_data: {query_data.get('rows')} rows")
+                    
+                    # Check if we should skip table when plot is also present
+                    tabulator_widget = None
+                    if plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
+                        if not show_query_tables.value:
+                            logger.info("Skipping query table rendering because plot_data is present and show_query_tables=False")
+                        else:
+                            tabulator_widget = _create_tabulator_from_query_data(query_data)
                     else:
                         tabulator_widget = _create_tabulator_from_query_data(query_data)
-                else:
-                    tabulator_widget = _create_tabulator_from_query_data(query_data)
-                
-                expression = query_data.get("expression", "")
-                workspace_button = _create_workspace_button_for_query(query_data)
-                components = _build_query_result_components(safe_answer, expression, tabulator_widget, workspace_button)
-                
-                yield pn.Column(
-                    *components,
-                    sizing_mode="stretch_width",
-                    min_height=200,
-                    margin=(0, 0, 20, 0)
-                )
-            
-            # Render plot_data natively
-            elif plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
-                logger.info(f"✅ Rendering plot from plot_data: type={plot_data.get('plot_type')}, interactive={plot_data.get('is_interactive')}")
-                
-                try:
-                    source_id = plot_data.get("source_id")
-                    plot_kwargs = plot_data.get("plot_kwargs", {})
-                    plot_type = plot_data.get("plot_type", "scatter")
-                    expression = plot_data.get("expression", "")
-                    plot_data_rows = plot_data.get("data")
                     
-                    if plot_data_rows:
-                        import polars as pl
-                        df = pl.DataFrame(plot_data_rows)
+                    if tabulator_widget:
+                        expression = query_data.get("expression", "")
+                        workspace_button = _create_workspace_button_for_query(query_data)
+                        query_components = _build_query_result_components(safe_answer, expression, tabulator_widget, workspace_button)
                         
-                        # For bar plots, ensure x-axis column is categorical
-                        if plot_type == "bar" and 'x' in plot_kwargs:
-                            x_col = plot_kwargs['x']
-                            if x_col in df.columns:
-                                df = df.with_columns(pl.col(x_col).cast(pl.Utf8))
+                        components_to_yield.append(pn.Column(
+                            *query_components,
+                            sizing_mode="stretch_width",
+                            min_height=200,
+                            margin=(0, 0, 20, 0)
+                        ))
+                
+                # Render plot_data natively (if present)
+                if plot_data and isinstance(plot_data, dict) and plot_data.get("plot_kwargs"):
+                    logger.info(f"✅ Rendering plot from plot_data: type={plot_data.get('plot_type')}, interactive={plot_data.get('is_interactive')}")
+                    
+                    try:
+                        source_id = plot_data.get("source_id")
+                        plot_kwargs = plot_data.get("plot_kwargs", {})
+                        plot_type = plot_data.get("plot_type", "scatter")
+                        expression = plot_data.get("expression", "")
+                        plot_data_rows = plot_data.get("data")
                         
-                        import hvplot.polars
-                        
-                        # Create the plot
-                        if plot_type == "scatter":
-                            plot = df.hvplot.scatter(**plot_kwargs)
-                        elif plot_type == "line":
-                            plot = df.hvplot.line(**plot_kwargs)
-                        elif plot_type == "bar":
-                            bar_kwargs = plot_kwargs.copy()
-                            bar_kwargs.pop('by', None)
-                            plot = df.hvplot.bar(**bar_kwargs)
-                        elif plot_type == "heatmap":
-                            plot = df.hvplot.heatmap(**plot_kwargs)
+                        if plot_data_rows:
+                            import polars as pl
+                            df = pl.DataFrame(plot_data_rows)
+                            
+                            # For bar plots, ensure x-axis column is categorical
+                            if plot_type == "bar" and 'x' in plot_kwargs:
+                                x_col = plot_kwargs['x']
+                                if x_col in df.columns:
+                                    df = df.with_columns(pl.col(x_col).cast(pl.Utf8))
+                            
+                            import hvplot.polars
+                            
+                            # Create the plot
+                            if plot_type == "scatter":
+                                plot = df.hvplot.scatter(**plot_kwargs)
+                            elif plot_type == "line":
+                                plot = df.hvplot.line(**plot_kwargs)
+                            elif plot_type == "bar":
+                                bar_kwargs = plot_kwargs.copy()
+                                bar_kwargs.pop('by', None)
+                                plot = df.hvplot.bar(**bar_kwargs)
+                            elif plot_type == "heatmap":
+                                plot = df.hvplot.heatmap(**plot_kwargs)
+                            else:
+                                plot = df.hvplot(**plot_kwargs)
+                            
+                            plot_pane = pn.pane.HoloViews(
+                                object=plot,
+                                sizing_mode="stretch_width",
+                                height=400
+                            )
+                            
+                            plot_info = f"**{plot_type.capitalize()}** plot • "
+                            plot_info += f"{'Interactive' if plot_data.get('is_interactive') else 'Static'} • "
+                            plot_info += f"{plot_data.get('row_count', 0)} points"
+                            
+                            x = plot_kwargs.get('x', '')
+                            y = plot_kwargs.get('y', '')
+                            workspace_button = _create_workspace_button_for_plot(plot_pane, plot_type, x, y)
+                            plot_components = _build_plot_result_components(None if components_to_yield else safe_answer, expression, plot_pane, plot_info, workspace_button)
+                            
+                            components_to_yield.append(pn.Column(
+                                *plot_components,
+                                sizing_mode="stretch_width",
+                                margin=(0, 0, 30, 0)
+                            ))
                         else:
-                            plot = df.hvplot(**plot_kwargs)
-                        
-                        plot_pane = pn.pane.HoloViews(
-                            object=plot,
-                            sizing_mode="stretch_width",
-                            height=400
-                        )
-                        
-                        plot_info = f"**{plot_type.capitalize()}** plot • "
-                        plot_info += f"{'Interactive' if plot_data.get('is_interactive') else 'Static'} • "
-                        plot_info += f"{plot_data.get('row_count', 0)} points"
-                        
-                        x = plot_kwargs.get('x', '')
-                        y = plot_kwargs.get('y', '')
-                        workspace_button = _create_workspace_button_for_plot(plot_pane, plot_type, x, y)
-                        components = _build_plot_result_components(safe_answer, expression, plot_pane, plot_info, workspace_button)
-                        
-                        yield pn.Column(
-                            *components,
-                            sizing_mode="stretch_width",
-                            margin=(0, 0, 30, 0)
-                        )
-                    else:
-                        yield "Error: No plot data received from backend"
-                except Exception as e:
-                    logger.exception("Failed to render plot")
-                    yield f"Error rendering plot: {str(e)}"
+                            components_to_yield.append("Error: No plot data received from backend")
+                    except Exception as e:
+                        logger.exception("Failed to render plot")
+                        components_to_yield.append(f"Error rendering plot: {str(e)}")
+                
+                # Yield all accumulated components (query table + plot)
+                if components_to_yield:
+                    yield pn.Column(*components_to_yield, sizing_mode="stretch_width")
             
             # Legacy markdown table rendering
             elif safe_answer and "|" in safe_answer and safe_answer.count("\n") > 2:
@@ -1620,6 +1718,8 @@ settings_card = pn.Card(
         trace_history_checkbox,
         trace_history_length,
         trace_download,
+        pn.pane.Markdown("**Debug Tools**"),
+        debug_prompt_btn,
         _recent_traces_accordion,
         status,
     ),
