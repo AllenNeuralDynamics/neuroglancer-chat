@@ -1,9 +1,10 @@
 import uuid
 from typing import Dict, List, Optional
+from datetime import datetime
 
 import polars as pl
 
-MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB cap
+MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB cap (matches uvicorn limit)
 
 
 class UploadedFileRecord:
@@ -51,12 +52,45 @@ class SummaryRecord:
         }
 
 
+class PlotRecord:
+    """Record of a generated plot with metadata."""
+    def __init__(
+        self,
+        plot_id: str,
+        source_id: str,
+        plot_type: str,
+        plot_html: str,
+        plot_spec: dict,
+        expression: Optional[str] = None,
+    ):
+        self.plot_id = plot_id
+        self.source_id = source_id  # file_id or summary_id
+        self.plot_type = plot_type
+        self.plot_html = plot_html
+        self.plot_spec = plot_spec  # {x, y, by, size, color, etc.}
+        self.expression = expression  # Optional Polars query used to prep data
+        self.created_at = datetime.now()
+    
+    def to_meta(self) -> dict:
+        return {
+            "plot_id": self.plot_id,
+            "source_id": self.source_id,
+            "plot_type": self.plot_type,
+            "plot_spec": self.plot_spec,
+            "expression": self.expression,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
 class DataMemory:
     """Ephemeral session-scoped data store for uploaded CSVs & derived summaries."""
 
-    def __init__(self):
+    def __init__(self, max_summaries: int = 100):
         self.files: Dict[str, UploadedFileRecord] = {}
         self.summaries: Dict[str, SummaryRecord] = {}
+        self.plots: Dict[str, PlotRecord] = {}
+        self.max_summaries = max_summaries
+        self.summary_order: List[str] = []  # Track insertion order for LRU
 
     def add_file(self, name: str, raw: bytes) -> dict:
         if len(raw) > MAX_FILE_BYTES:
@@ -65,13 +99,46 @@ class DataMemory:
             df = pl.read_csv(raw)
         except Exception as e:  # pragma: no cover - defensive
             raise ValueError(f"Failed to parse CSV: {e}") from e
-        fid = uuid.uuid4().hex[:8]
+        
+        # Check for duplicate filename and replace if exists
+        existing_fid = None
+        for fid, rec in self.files.items():
+            if rec.name == name:
+                existing_fid = fid
+                break
+        
+        if existing_fid:
+            # Reuse existing file_id when replacing
+            fid = existing_fid
+        else:
+            # Generate new file_id for new file
+            fid = uuid.uuid4().hex[:8]
+        
         rec = UploadedFileRecord(fid, name, len(raw), df)
         self.files[fid] = rec
         return rec.to_meta()
 
     def list_files(self) -> List[dict]:
         return [rec.to_meta() for rec in self.files.values()]
+
+    def remove_file(self, file_id: str) -> bool:
+        """Remove a file and all its derived summaries. Returns True if file existed."""
+        if file_id not in self.files:
+            return False
+        
+        # Remove the file
+        del self.files[file_id]
+        
+        # Remove all summaries derived from this file
+        to_remove = [sid for sid, rec in self.summaries.items() 
+                     if rec.source_file_id == file_id]
+        for sid in to_remove:
+            del self.summaries[sid]
+            # Also remove from order tracking
+            if sid in self.summary_order:
+                self.summary_order.remove(sid)
+        
+        return True
 
     def get_df(self, file_id: str) -> pl.DataFrame:
         if file_id not in self.files:
@@ -81,9 +148,18 @@ class DataMemory:
     def add_summary(
         self, file_id: str, kind: str, df: pl.DataFrame, note: str | None = None
     ) -> dict:
+        # Enforce max summaries limit (LRU eviction)
+        if len(self.summaries) >= self.max_summaries:
+            # Remove oldest summary
+            if self.summary_order:
+                oldest_id = self.summary_order.pop(0)
+                if oldest_id in self.summaries:
+                    del self.summaries[oldest_id]
+        
         sid = uuid.uuid4().hex[:8]
         rec = SummaryRecord(sid, file_id, kind, df, note)
         self.summaries[sid] = rec
+        self.summary_order.append(sid)
         return rec.to_meta()
 
     def list_summaries(self) -> List[dict]:
@@ -98,6 +174,30 @@ class DataMemory:
         if summary_id not in self.summaries:
             raise KeyError(f"Unknown summary_id: {summary_id}")
         return self.summaries[summary_id]
+
+    def add_plot(
+        self, 
+        source_id: str, 
+        plot_type: str, 
+        plot_html: str, 
+        plot_spec: dict, 
+        expression: Optional[str] = None
+    ) -> dict:
+        """Store a generated plot and return metadata."""
+        plot_id = uuid.uuid4().hex[:8]
+        rec = PlotRecord(plot_id, source_id, plot_type, plot_html, plot_spec, expression)
+        self.plots[plot_id] = rec
+        return rec.to_meta()
+
+    def list_plots(self) -> List[dict]:
+        """List all generated plots (metadata only, no HTML)."""
+        return [rec.to_meta() for rec in self.plots.values()]
+
+    def get_plot(self, plot_id: str) -> PlotRecord:
+        """Retrieve full plot record including HTML."""
+        if plot_id not in self.plots:
+            raise KeyError(f"Unknown plot_id: {plot_id}")
+        return self.plots[plot_id]
 
 
 class InteractionMemory:

@@ -68,12 +68,42 @@ class NeuroglancerState:
             raise ValueError(f"Unsupported layer_type '{layer_type}'. Allowed: {sorted(ALLOWED_LAYER_TYPES)}")
         if any(L.get("name") == name for L in self.data.get("layers", [])):
             return self  # idempotent
-        layer = {
-            "type": layer_type,
-            "name": name,
-            "source": source if source is not None else "precomputed://example",
-            "visible": kwargs.pop("visible", True),
-        }
+        
+        # Special handling for annotation layers to match Neuroglancer's actual schema
+        if layer_type == "annotation":
+            if source is None:
+                source = {"url": "local://annotations"}
+            elif isinstance(source, str):
+                source = {"url": source}
+            
+            # Get color from either annotationColor or annotation_color
+            color = kwargs.pop("annotationColor", kwargs.pop("annotation_color", None))
+            if not color:
+                color = "#cecd11"  # Default yellow
+            
+            # Annotation layers need these fields at layer level (not in source)
+            layer = {
+                "type": layer_type,
+                "source": source,
+                "tool": kwargs.pop("tool", "annotatePoint"),
+                "tab": kwargs.pop("tab", "annotations"),
+                "annotationColor": color,
+                "annotations": [],  # annotations array at layer level
+                "name": name,
+                "visible": kwargs.pop("visible", True),  # Make annotation layers visible by default
+            }
+        else:
+            # For image/segmentation layers, use string source
+            if source is None:
+                source = "precomputed://example"
+            
+            layer = {
+                "type": layer_type,
+                "name": name,
+                "source": source,
+                "visible": kwargs.pop("visible", True),
+            }
+        
         for k, v in kwargs.items():
             layer[k] = v
         self.data.setdefault("layers", []).append(layer)
@@ -87,11 +117,40 @@ class NeuroglancerState:
         return self
 
     def add_annotations(self, layer: str, items: Iterable[Dict]):
+        """Add annotation items to an annotation layer.
+        
+        Follows Neuroglancer's actual schema:
+        - annotations array is at layer level (not in source)
+        - each item must have 'type' field ('point', 'box', 'ellipsoid', etc.)
+        """
         ann = next((L for L in self.data.get("layers", []) if L.get("type") == "annotation" and L.get("name") == layer), None)
         if not ann:
-            ann = {"type": "annotation", "name": layer, "source": {"annotations": []}}
-            self.data.setdefault("layers", []).append(ann)
-        ann["source"].setdefault("annotations", []).extend(items)
+            # Create layer if it doesn't exist
+            self.add_layer(layer, "annotation")
+            ann = next((L for L in self.data.get("layers", []) if L.get("type") == "annotation" and L.get("name") == layer))
+        
+        # Ensure annotations array exists at layer level
+        ann.setdefault("annotations", []).extend(items)
+        return self
+
+    def set_viewer_settings(self, showScaleBar=None, showDefaultAnnotations=None, 
+                          showAxisLines=None, layout=None):
+        """Update top-level viewer settings.
+        
+        These settings control viewer-wide display options:
+        - showScaleBar: Display scale bar overlay
+        - showDefaultAnnotations: Show built-in annotations
+        - showAxisLines: Display axis lines in viewer
+        - layout: Viewer layout mode (xy, xz, yz, 3d, 4panel)
+        """
+        if showScaleBar is not None:
+            self.data["showScaleBar"] = showScaleBar
+        if showDefaultAnnotations is not None:
+            self.data["showDefaultAnnotations"] = showDefaultAnnotations
+        if showAxisLines is not None:
+            self.data["showAxisLines"] = showAxisLines
+        if layout is not None:
+            self.data["layout"] = layout
         return self
 
     # --- Serialization helpers -------------------------------------------------
@@ -149,7 +208,10 @@ def to_url(state) -> str:
     if not isinstance(state, dict):  # pragma: no cover (defensive)
         raise TypeError("to_url() expects a dict or serializable state string")
 
-    state_str = json.dumps(state, separators=(",", ":"), sort_keys=True)
+    # CRITICAL: Do NOT use sort_keys=True here as it will reorder the dimensions
+    # (e.g., x,y,z,t -> t,x,y,z) which breaks the position array mapping!
+    # Python 3.7+ preserves dict insertion order, so we maintain the original dimension order.
+    state_str = json.dumps(state, separators=(",", ":"))
     encoded = quote(state_str, safe="")
     # Neuroglancer canonical form uses '#!' before the JSON; include it.
     return f"{NEURO_BASE}#!{encoded}"

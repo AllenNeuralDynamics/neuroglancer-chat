@@ -1,10 +1,26 @@
 # Start neurogabber panel frontend only (for development)
-# Usage: .\start_panel.ps1
+# Usage: .\start_panel.ps1 [-NoStreaming]
+
+param(
+    [switch]$Streaming
+)
 
 Write-Host "Starting neurogabber panel frontend..." -ForegroundColor Cyan
 
 # Set backend URL
 $env:BACKEND = "http://127.0.0.1:8000"
+
+# set no streaming mode
+$env:USE_STREAMING = "false"
+
+# Check for streaming mode flag
+if ($Streaming) {
+    $env:USE_STREAMING = "true"
+    Write-Host "Streaming mode ENABLED - using streaming chat endpoint" -ForegroundColor Green
+} else {
+    $env:USE_STREAMING = "false"
+    Write-Host "Streaming mode DISABLED - using standard chat endpoint" -ForegroundColor Yello
+}
 
 # Change to panel directory
 Set-Location "$PSScriptRoot\src\neurogabber"

@@ -23,7 +23,8 @@ def test_add_annotations_appends_items():
     data = s.as_dict()
     ann_layers = [L for L in data["layers"] if L.get("type") == "annotation"]
     assert len(ann_layers) == 1
-    anns = ann_layers[0]["source"]["annotations"]
+    # Annotations are now at layer level, not in source
+    anns = ann_layers[0]["annotations"]
     assert len(anns) == 3
 
 

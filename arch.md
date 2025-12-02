@@ -197,11 +197,19 @@ Data (Polars):
 * `POST /tools/data_list_summaries` — list derived tables
 * `POST /tools/data_ingest_csv_rois` — legacy ROI ingest (top‑N)
 * `POST /tools/data_plot_histogram` — histogram (stub)
+* `POST /tools/data_query_polars` — execute Polars expressions
+* `POST /tools/data_plot` — generate interactive plots (scatter/line/bar/heatmap)
+* `POST /tools/data_list_plots` — list generated plots
 
 ## Current features
 * Prompt-driven navigation: set view, set LUT, add / hide layers, add annotations.
 * CSV drag & drop → in-memory Polars DataFrames with short IDs.
 * Data tools: list, preview, describe, select, list summaries.
+* **Interactive plotting**: Generate scatter, line, bar, and heatmap plots using hvPlot.
+  * Automatic spatial column inclusion in queries for future Neuroglancer integration.
+  * Configurable interactivity (default: interactive for ≤200 points, static above).
+  * Optional Polars expression for data transformation before plotting.
+  * Plots stored in DataMemory with workspace integration.
 * Interaction memory: rolling context appended to system messages.
 * Histogram + ROI ingest stubs.
 * Server-side orchestration of multi-step tool calls + conditional NG auto-load.
@@ -225,6 +233,8 @@ Data (Polars):
 * Memory summarization / condensation (semantic compression) for long chats.
 * Richer multi‑view workflows (pagination, client-side filtering, per-row annotation overlays).
 * Row-level warning surfacing in UI for partial failures during multi-view generation.
+* **Plot click-to-view**: Neuroglancer links for scatter plot points (click to navigate to spatial location).
+* **Plot workspace**: Persistent plot gallery in Panel sidebar with thumbnails and replay.
 
 ## Tool Trace & Observability
 

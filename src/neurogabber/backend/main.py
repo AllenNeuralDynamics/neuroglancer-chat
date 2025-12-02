@@ -7,7 +7,12 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), '.env'))
 
 from fastapi import FastAPI, UploadFile, Body, Query, File
-from .models import ChatRequest, SetView, SetLUT, AddAnnotations, HistogramReq, IngestCSV, SaveState
+from fastapi.responses import StreamingResponse
+from .models import (
+    ChatRequest, SetView, SetLUT, AddAnnotations, HistogramReq, IngestCSV, SaveState,
+    AddLayer, SetLayerVisibility, NgSetViewerSettings, StateLoad, StateSummary,
+    DataInfo, DataPreview, DataDescribe, DataQuery, DataPlot, NgViewsTable, NgAnnotationsFromData
+)
 from .tools.neuroglancer_state import (
     NeuroglancerState,
     to_url,
@@ -16,7 +21,7 @@ from .tools.neuroglancer_state import (
 from .tools.plots import sample_voxels, histogram
 from .tools.io import load_csv, top_n_rois
 from .storage.states import save_state, load_state
-from .adapters.llm import run_chat, SYSTEM_PROMPT, MODEL
+from .adapters.llm import run_chat, run_chat_stream, SYSTEM_PROMPT, MODEL
 from .tools.constants import is_mutating_tool
 from .storage.data import DataMemory, InteractionMemory
 from .observability.timing import TimingCollector
@@ -24,20 +29,54 @@ import polars as pl
 
 import logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Enable verbose debug logging when NEUROGABBER_DEBUG is set (1/true/yes)
 DEBUG_ENABLED = os.getenv("NEUROGABBER_DEBUG", "").lower() in ("1", "true", "yes")
 
-def _dbg(msg: str):  # lightweight wrapper to centralize debug guard
-    if DEBUG_ENABLED:
-        try:
-            logger.info(f"[DBG] {msg}")
-        except Exception:
-            pass
+# Configure logging level based on debug flag
+log_level = logging.DEBUG if DEBUG_ENABLED else logging.INFO
+logging.basicConfig(
+    level=log_level,
+    format="%(levelname)s: %(asctime)s | %(name)s | %(message)s",
+    force=True  # Force reconfiguration even if uvicorn already configured logging
+)
 
+# Also configure the root logger and uvicorn's loggers explicitly
+# Uvicorn configures logging after module import, so we need to be aggressive
+if DEBUG_ENABLED:
+    # Set root logger to DEBUG
+    logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Configure uvicorn and our backend loggers
+    for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error", "backend.main", __name__]:
+        logging.getLogger(logger_name).setLevel(logging.DEBUG)
+    
+    # Silence noisy third-party libraries - keep them at INFO even in debug mode
+    for noisy_logger in ["openai", "httpx", "httpcore", "python_multipart.multipart"]:
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+
+def _dbg(msg: str):  # lightweight wrapper to centralize debug guard
+    """Debug logging wrapper - now uses proper logger.debug()"""
+    logger.debug(msg)
+
+# Configure FastAPI with increased file upload limit (500MB)
 app = FastAPI()
+
+# Configure request body size limit (500MB for CSV uploads)
+# This needs to be set at the ASGI server level (uvicorn) as well
+app.state.max_upload_size = 500 * 1024 * 1024  # 500 MB
+
+# Log debug mode status on startup
+if DEBUG_ENABLED:
+    logger.warning("🔍 DEBUG MODE ENABLED - Verbose logging active (NEUROGABBER_DEBUG=1)")
+else:
+    logger.info("Debug mode disabled. Set NEUROGABBER_DEBUG=1 to enable verbose logging.")
+
+# Configuration: Control what tool results the LLM sees
+# Set to False to hide query data from LLM (sends minimal acknowledgment instead)
+# Set to True to send full data results to LLM (original behavior)
+SEND_DATA_TO_LLM = False
 
 # In-memory working state per session (MVP). Replace with DB keyed by user/session.
 CURRENT_STATE = NeuroglancerState()
@@ -45,6 +84,125 @@ DATA_MEMORY = DataMemory()
 INTERACTION_MEMORY = InteractionMemory()
 _TRACE_HISTORY: list[dict] = []  # store recent full traces (in-memory, capped)
 _TRACE_HISTORY_MAX = 50
+LAST_QUERY_SUMMARY_ID = None  # Track most recent query result for easy reference
+
+
+def _translate_pandas_to_polars(expression: str) -> str:
+    """Auto-translate common pandas syntax to Polars.
+    
+    This allows the LLM to use familiar pandas patterns while we use Polars internally.
+    Keeps all the performance benefits of Polars without confusing the model.
+    
+    Args:
+        expression: Python expression string (potentially with pandas syntax)
+    
+    Returns:
+        Expression with pandas patterns converted to Polars equivalents
+    """
+    # Replace method names (word boundaries to avoid partial matches)
+    import re
+    
+    # DataFrame methods
+    expression = re.sub(r'\.groupby\(', '.group_by(', expression)
+    expression = re.sub(r'\.distinct\(\)', '.unique()', expression)
+    
+    # Parameter names in method calls
+    expression = re.sub(r'\breverse=True\b', 'descending=True', expression)
+    expression = re.sub(r'\breverse=False\b', 'descending=False', expression)
+    
+    # Aggregation method names
+    expression = re.sub(r'\.agg\(', '.agg(', expression)  # Already compatible, but for completeness
+    
+    # CRITICAL: Convert pandas-style boolean indexing to Polars .filter()
+    # Pattern: df[df['col'] op value] → df.filter(pl.col('col') op value)
+    # Handles: ==, !=, >, <, >=, <=
+    # Simple single condition
+    simple_pattern = r"df\[df\['(\w+)'\]\s*(==|!=|>|<|>=|<=)\s*([^\]]+)\]"
+    expression = re.sub(
+        simple_pattern,
+        r"df.filter(pl.col('\1') \2 \3)",
+        expression
+    )
+    
+    # Complex with parentheses: df[(df['a']==1) & (df['b']==2)]
+    # First convert inner conditions: df['col'] op val → pl.col('col') op val
+    complex_inner_pattern = r"df\['(\w+)'\]\s*(==|!=|>|<|>=|<=)\s*([^\)&|]+)"
+    expression = re.sub(
+        complex_inner_pattern,
+        r"pl.col('\1') \2 \3",
+        expression
+    )
+    
+    # Then wrap in .filter() if still using df[...] notation
+    if 'df[' in expression and 'pl.col' in expression:
+        # df[(pl.col...)] → df.filter(pl.col...)
+        expression = re.sub(r'df\[\((.+)\)\]', r'df.filter(\1)', expression)
+        expression = re.sub(r'df\[([^\[\]]+)\]', r'df.filter(\1)', expression)
+    
+    return expression
+
+
+def _detect_spatial_columns(df) -> tuple[list[str], str] | None:
+    """Detect spatial coordinate columns in a dataframe.
+    
+    Returns:
+        Tuple of (column_names, pattern) or None if not found.
+        Patterns: 'xyz', 'centroid_xyz', etc.
+    """
+    import polars as pl
+    cols = df.columns
+    
+    # Try common patterns in order of preference
+    patterns = [
+        (['x', 'y', 'z'], 'xyz'),
+        (['centroid_x', 'centroid_y', 'centroid_z'], 'centroid_xyz'),
+        (['center_x', 'center_y', 'center_z'], 'center_xyz'),
+        (['pos_x', 'pos_y', 'pos_z'], 'pos_xyz'),
+        (['X', 'Y', 'Z'], 'XYZ'),
+    ]
+    
+    for col_names, pattern in patterns:
+        if all(c in cols for c in col_names):
+            return (col_names, pattern)
+    
+    return None
+
+
+def _generate_ng_links_for_rows(df, spatial_cols: list[str]) -> list[str]:
+    """Generate Neuroglancer URLs for each row based on spatial coordinates.
+    
+    Hybrid approach: Returns raw URLs. Frontend will render them as clickable links.
+    
+    Args:
+        df: Polars DataFrame with spatial columns
+        spatial_cols: List of [x_col, y_col, z_col] column names
+        
+    Returns:
+        List of raw NG URLs, one per row
+    """
+    global CURRENT_STATE
+    
+    links = []
+    for row in df.to_dicts():
+        try:
+            cx, cy, cz = row[spatial_cols[0]], row[spatial_cols[1]], row[spatial_cols[2]]
+            # Skip rows with null coordinates
+            if cx is None or cy is None or cz is None:
+                links.append("")
+                continue
+                
+            # Clone current state and set view to this row's coordinates
+            state_copy = CURRENT_STATE.clone()
+            state_copy.set_view({"x": cx, "y": cy, "z": cz}, None, None)
+            link_url = state_copy.to_url()
+            
+            # Return raw URL (frontend will create markdown link)
+            links.append(link_url)
+        except Exception as e:
+            _dbg(f"Failed to generate link for row: {e}")
+            links.append("")
+    
+    return links
 
 
 @app.post("/tools/ng_set_view")
@@ -60,45 +218,113 @@ def t_set_lut(args: SetLUT):
     return {"ok": True}
 
 @app.post("/tools/ng_add_layer")
-def t_add_layer(name: str = Body(..., embed=True), layer_type: str = Body("image", embed=True), source: str | dict | None = Body(None, embed=True), visible: bool = Body(True, embed=True)):
+def t_add_layer(args: AddLayer):
     """Add a new layer to the Neuroglancer state if it does not already exist.
 
     The source parameter is passed through verbatim; clients are responsible for supplying a valid Neuroglancer source spec.
+    For annotation layers, annotation_color can specify the color (hex or name).
     """
     global CURRENT_STATE
     try:
-        CURRENT_STATE.add_layer(name=name, layer_type=layer_type, source=source, visible=visible)
-        return {"ok": True, "layer": name, "layer_type": layer_type}
+        kwargs = {"visible": args.visible}
+        if args.annotation_color:
+            kwargs["annotation_color"] = args.annotation_color
+        CURRENT_STATE.add_layer(name=args.name, layer_type=args.layer_type, source=args.source, **kwargs)
+        return {"ok": True, "layer": args.name, "layer_type": args.layer_type}
     except ValueError as ve:
         return {"ok": False, "error": str(ve)}
     except Exception as e:
         return {"ok": False, "error": f"Failed to add layer: {e}"}
 
 @app.post("/tools/ng_set_layer_visibility")
-def t_set_layer_visibility(name: str = Body(..., embed=True), visible: bool = Body(True, embed=True)):
+def t_set_layer_visibility(args: SetLayerVisibility):
     """Set the visibility flag on an existing layer.
 
     Adds a 'visible' key if not already present; silently no-ops if layer not found.
     """
     global CURRENT_STATE
-    CURRENT_STATE.set_layer_visibility(name=name, visible=visible)
-    return {"ok": True, "layer": name, "visible": visible}
+    CURRENT_STATE.set_layer_visibility(name=args.name, visible=args.visible)
+    return {"ok": True, "layer": args.name, "visible": args.visible}
+
+@app.post("/tools/ng_set_viewer_settings")
+def t_set_viewer_settings(args: NgSetViewerSettings):
+    """Set top-level viewer display settings.
+    
+    Updates viewer-wide display options like scale bar, axis lines, annotations, and layout.
+    """
+    global CURRENT_STATE
+    CURRENT_STATE.set_viewer_settings(
+        showScaleBar=args.showScaleBar,
+        showDefaultAnnotations=args.showDefaultAnnotations,
+        showAxisLines=args.showAxisLines,
+        layout=args.layout
+    )
+    return {"ok": True}
 
 @app.post("/tools/ng_annotations_add")
 def t_add_annotations(args: AddAnnotations):
+    """Add annotation(s) to a layer. Accepts either single annotation or items array."""
     global CURRENT_STATE
+    from .models import Vec3, Annotation
+    
+    # Convert single annotation format to items array if needed
+    annotations_list = args.items if args.items else []
+    
+    if not annotations_list and args.center:
+        # Single annotation provided - convert to Annotation object
+        ann_type = args.type or "point"
+        center_obj = Vec3(x=args.center['x'], y=args.center['y'], z=args.center['z'])
+        size_obj = None
+        if args.size:
+            size_obj = Vec3(x=args.size.get('x', 1), y=args.size.get('y', 1), z=args.size.get('z', 1))
+        elif ann_type in ["box", "ellipsoid"]:
+            size_obj = Vec3(x=1, y=1, z=1)  # Default size
+        
+        annotation = Annotation(
+            type=ann_type,
+            center=center_obj,
+            size=size_obj,
+            id=args.id
+        )
+        annotations_list = [annotation]
+    
+    if not annotations_list:
+        return {"ok": False, "error": "Must provide either 'items' array or 'center' for single annotation"}
+    
+    # Convert to Neuroglancer format
+    # Check if state has time dimension - if so, add 4th coordinate (default to 0)
+    has_time_dim = 't' in CURRENT_STATE.data.get('dimensions', {})
+    
     items = []
-    for a in args.items:
+    for a in annotations_list:
         if a.type == "point":
-            items.append({"point": [a.center.x, a.center.y, a.center.z], "id": a.id or None})
+            # Must include 'type' field as per Neuroglancer schema
+            # If state has time dimension, include 4th coordinate
+            point_coords = [a.center.x, a.center.y, a.center.z, 0] if has_time_dim else [a.center.x, a.center.y, a.center.z]
+            items.append({
+                "point": point_coords,
+                "type": "point",
+                "id": a.id or None
+            })
         elif a.type == "box":
-            items.append({"type":"box", "point": [a.center.x, a.center.y, a.center.z],
-                          "size": [a.size.x, a.size.y, a.size.z], "id": a.id or None})
+            point_coords = [a.center.x, a.center.y, a.center.z, 0] if has_time_dim else [a.center.x, a.center.y, a.center.z]
+            items.append({
+                "type": "box",
+                "point": point_coords,
+                "size": [a.size.x, a.size.y, a.size.z],
+                "id": a.id or None
+            })
         elif a.type == "ellipsoid":
-            items.append({"type":"ellipsoid", "center": [a.center.x, a.center.y, a.center.z],
-                          "radii": [a.size.x/2, a.size.y/2, a.size.z/2], "id": a.id or None})
+            center_coords = [a.center.x, a.center.y, a.center.z, 0] if has_time_dim else [a.center.x, a.center.y, a.center.z]
+            items.append({
+                "type": "ellipsoid",
+                "center": center_coords,
+                "radii": [a.size.x/2, a.size.y/2, a.size.z/2],
+                "id": a.id or None
+            })
+    
     CURRENT_STATE.add_annotations(args.layer, items)
-    return {"ok": True}
+    return {"ok": True, "n_annotations": len(items)}
 
 @app.post("/tools/data_plot_histogram")
 def t_hist(args: HistogramReq):
@@ -132,21 +358,47 @@ def t_save_state(_: SaveState, mask: bool = Query(False, description="Return mas
 
 
 @app.post("/tools/state_load")
-def t_state_load(link: str = Body(..., embed=True)):
+def t_state_load(args: StateLoad):
     """Load state from a Neuroglancer URL or fragment and set CURRENT_STATE."""
     global CURRENT_STATE
     try:
-        CURRENT_STATE = NeuroglancerState.from_url(link)
-        return {"ok": True}
+        CURRENT_STATE = NeuroglancerState.from_url(args.link)
+        
+        # Apply user's preferred defaults if not present in loaded state
+        defaults_applied = False
+        
+        # Use provided defaults from settings panel or fall back to system defaults
+        if args.default_settings:
+            defaults = args.default_settings
+        else:
+            # Fallback system defaults if frontend doesn't provide them
+            defaults = {
+                "showScaleBar": True,
+                "showDefaultAnnotations": False,
+                "showAxisLines": False,
+                "layout": "xy"
+            }
+        
+        for key, default_val in defaults.items():
+            if key not in CURRENT_STATE.data:
+                CURRENT_STATE.data[key] = default_val
+                defaults_applied = True
+        
+        # Return updated URL if defaults were applied
+        result = {"ok": True}
+        if defaults_applied:
+            result["updated_url"] = CURRENT_STATE.to_url()
+        
+        return result
     except Exception as e:
         logger.exception("Failed to load state from link")
         return {"ok": False, "error": str(e)}
 
 
 @app.post("/tools/demo_load")
-def t_demo_load(link: str = Body(..., embed=True)):
+def t_demo_load(args: StateLoad):
     """Convenience: same as state_load, named for demos."""
-    return t_state_load(link)
+    return t_state_load(args)
 
 # TODO
 #Optional (alternative path): if you prefer “read-only” to still be tool-based, 
@@ -182,21 +434,179 @@ def _data_context_block(max_files: int = 10, max_summaries: int = 10) -> str:
     sums = DATA_MEMORY.list_summaries()[:max_summaries]
     parts = ["Data context:"]
     if files:
-        parts.append("Files:")
-        for f in files:
-            parts.append(f"- {f['file_id']} {f['name']} rows={f['n_rows']} cols={f['n_cols']} cols={f['columns'][:6]}...")
+        # Highlight the most recent file
+        most_recent = files[-1] if files else None
+        if most_recent:
+            # Check for spatial columns in the most recent file
+            try:
+                df = DATA_MEMORY.get_df(most_recent['file_id'])
+                spatial_info = _detect_spatial_columns(df)
+                spatial_note = ""
+                if spatial_info:
+                    spatial_cols, pattern = spatial_info
+                    spatial_note = f" [HAS SPATIAL COLS: {', '.join(spatial_cols)}]"
+                parts.append(f"Primary data file: file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}{spatial_note}")
+                parts.append(f"→ For operations (annotations, plots, views): use file_id='{most_recent['file_id']}' with optional filter_expression")
+            except:
+                parts.append(f"Primary data file: file_id='{most_recent['file_id']}' name='{most_recent['name']}' rows={most_recent['n_rows']} cols={most_recent['columns']}")
+                parts.append(f"→ For operations (annotations, plots, views): use file_id='{most_recent['file_id']}' with optional filter_expression")
+        
+        if len(files) > 1:
+            parts.append("Other files:")
+            for f in files[:-1]:
+                parts.append(f"- {f['file_id']} {f['name']} rows={f['n_rows']} cols={f['n_cols']} cols={f['columns'][:6]}...")
     else:
         parts.append("Files: (none)")
     if sums:
-        parts.append("Summaries:")
-        for s in sums:
+        parts.append("Query results (for preview only, not for operations):")
+        for s in sums[:3]:  # Limit to 3 most recent to reduce noise
             parts.append(f"- {s['summary_id']} from {s['source_file_id']} kind={s['kind']} rows={s['n_rows']} cols={s['n_cols']}")
-    else:
-        parts.append("Summaries: (none)")
     mem = INTERACTION_MEMORY.recall()
     if mem:
         parts.append(f"Recent interactions: {mem}")
     return "\n".join(parts)
+
+
+@app.post("/agent/chat/stream")
+async def agent_chat_stream(req: ChatRequest = Body(...)):
+    """Stream agent chat responses using Server-Sent Events."""
+    _dbg("📨 /agent/chat/stream endpoint called")
+    
+    import json
+    import asyncio
+    
+    async def event_generator():
+        try:
+            # Get current state summary
+            summary_text = _summarize_state(CURRENT_STATE)
+            
+            # Build conversation with system prompt and state context
+            conversation = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": f"Current viewer state summary:\n{summary_text}"}
+            ]
+            conversation.extend([m.model_dump() for m in req.messages])
+            
+            max_iters = 10
+            total_content = ""
+            overall_mutated = False
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
+            
+            for iteration in range(max_iters):
+                # Send iteration start event
+                yield f"data: {json.dumps({'type': 'iteration', 'iteration': iteration})}\n\n"
+                
+                # Stream LLM response
+                accumulated_message = None
+                tool_calls = None
+                
+                for chunk in run_chat_stream(conversation):
+                    if chunk["type"] == "content":
+                        total_content += chunk["delta"]
+                        yield f"data: {json.dumps({'type': 'content', 'delta': chunk['delta']})}\n\n"
+                        await asyncio.sleep(0)  # Allow other tasks to run
+                    
+                    elif chunk["type"] == "tool_calls":
+                        tool_calls = chunk["tool_calls"]
+                        yield f"data: {json.dumps({'type': 'tool_calls', 'tool_calls': tool_calls})}\n\n"
+                    
+                    elif chunk["type"] == "done":
+                        accumulated_message = chunk["message"]
+                        usage = chunk.get("usage", {})
+                        total_prompt_tokens += usage.get("prompt_tokens", 0)
+                        total_completion_tokens += usage.get("completion_tokens", 0)
+                        yield f"data: {json.dumps({'type': 'llm_done', 'usage': usage})}\n\n"
+                
+                # If no tool calls, we're done
+                if not tool_calls:
+                    break
+                
+                # Execute tools
+                conversation.append(accumulated_message)
+                
+                for tc in tool_calls:
+                    func = tc.get("function") or {}
+                    tool_name = func.get("name")
+                    args_str = func.get("arguments", "{}")
+                    
+                    yield f"data: {json.dumps({'type': 'tool_start', 'tool': tool_name})}\n\n"
+                    
+                    try:
+                        args = json.loads(args_str)
+                        result = _execute_tool_by_name(tool_name, args)
+                        
+                        # Track if this tool mutates state
+                        if is_mutating_tool(tool_name):
+                            overall_mutated = True
+                        
+                        # Apply data hiding for data_query_polars if SEND_DATA_TO_LLM is False
+                        llm_result = result
+                        if tool_name == "data_query_polars" and not SEND_DATA_TO_LLM:
+                            if isinstance(result, dict) and result.get("ok"):
+                                llm_result = {
+                                    "ok": True,
+                                    "rows": result.get("rows"),
+                                    "columns": result.get("columns"),
+                                    "expression": result.get("expression"),
+                                    "message": "✅ Query executed successfully. Data is being rendered in an interactive table widget. Do NOT format, display, or summarize the data - it's already handled by the frontend."
+                                }
+                        
+                        # Apply data hiding for data_plot if SEND_DATA_TO_LLM is False
+                        if tool_name == "data_plot" and not SEND_DATA_TO_LLM:
+                            if isinstance(result, dict) and result.get("ok"):
+                                llm_result = {
+                                    "ok": True,
+                                    "plot_id": result.get("plot_id"),
+                                    "plot_type": result.get("plot_type"),
+                                    "row_count": result.get("row_count"),
+                                    "source_id": result.get("source_id"),
+                                    "message": "✅ Plot generated successfully. The interactive plot is being rendered in the workspace. Do NOT describe or summarize the plot - it's already displayed."
+                                }
+                        
+                        # Convert result to string safely for streaming
+                        result_str = str(llm_result) if llm_result is not None else ""
+                        # Limit very large results to prevent memory issues
+                        if len(result_str) > 5000:
+                            result_str = result_str[:5000] + "... (truncated)"
+                        yield f"data: {json.dumps({'type': 'tool_done', 'tool': tool_name, 'result': result_str})}\n\n"
+                        
+                        conversation.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "name": tool_name,
+                            "content": json.dumps(llm_result)
+                        })
+                    except Exception as e:
+                        error_msg = f"Tool {tool_name} error: {e}"
+                        yield f"data: {json.dumps({'type': 'tool_error', 'tool': tool_name, 'error': str(e)})}\n\n"
+                        conversation.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "name": tool_name,
+                            "content": json.dumps({"error": str(e)})
+                        })
+            
+            # After loop completes, send final event with accumulated content
+            state_link = None
+            if overall_mutated:
+                url = CURRENT_STATE.to_url()
+                masked = _mask_ng_urls(url)
+                state_link = {"url": url, "masked_markdown": masked}
+            
+            usage_summary = {
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_tokens": total_prompt_tokens + total_completion_tokens
+            }
+            
+            yield f"data: {json.dumps({'type': 'final', 'content': total_content, 'mutated': overall_mutated, 'state_link': state_link, 'usage': usage_summary})}\n\n"
+            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/agent/chat")
@@ -209,6 +619,8 @@ def chat(req: ChatRequest):
     Returns the final model response (with intermediate tool messages NOT included
     to keep client payload small) plus optional `state_link` if a mutating tool ran.
     """
+    _dbg("📨 /agent/chat endpoint called")
+    
     # Initialize timing collector
     user_prompt = next((m.content for m in req.messages if m.role == "user"), "")
     timing = TimingCollector(user_prompt=user_prompt or "")
@@ -240,16 +652,49 @@ def chat(req: ChatRequest):
         ]
         conversation = base_messages + [m.model_dump() for m in req.messages]
     
-    max_iters = 3
+    max_iters = 15  # Increased to support repetitive operations (e.g., multiple layers/annotations)
     overall_mutated = False
     tool_execution_records = []  # truncated records for response
     full_trace_steps = []  # full detail trace retained server-side
     aggregated_views_table = None
+    aggregated_ng_views = None  # Track ng_views from data_query_polars
+    aggregated_query_data = None  # Track full data result from data_query_polars for frontend rendering
+    aggregated_plot_data = None  # Track plot result from data_plot for frontend rendering
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
 
     timing.start_agent_loop()
     
     for iteration in range(max_iters):
         iter_timing = timing.start_iteration(iteration)
+        
+        # Inject iteration tracking as ephemeral system message (after first iteration)
+        if iteration > 0:
+            prev_summary_parts = []
+            
+            # Summarize what happened in previous iteration
+            if tool_execution_records:
+                last_tools = [rec["tool"] for rec in tool_execution_records[-3:]]  # Last 3 tools
+                prev_summary_parts.append(f"Previous tools: {', '.join(last_tools)}")
+            
+            # Check if last tool had an error
+            if conversation and conversation[-1].get("role") == "tool":
+                last_tool_content = conversation[-1].get("content", "")
+                try:
+                    import json as _json
+                    last_result = _json.loads(last_tool_content)
+                    if isinstance(last_result, dict) and "error" in last_result:
+                        prev_summary_parts.append(f"⚠️ Last tool had error - apply fix and retry")
+                except:
+                    pass
+            
+            iter_context = " | ".join(prev_summary_parts) if prev_summary_parts else "Continuing"
+            
+            iter_msg = {
+                "role": "system",
+                "content": f"🔄 Iteration {iteration+1}/{max_iters} | {iter_context}\n\nReminder: If there was an error, make a corrected tool call now (no explanation)."
+            }
+            conversation.append(iter_msg)
         
         _dbg(f"Iteration {iteration} start; messages so far={len(conversation)}")
         
@@ -259,10 +704,14 @@ def chat(req: ChatRequest):
             # Extract token usage if available
             usage = out.get("usage", {})
             if usage:
+                prompt_toks = usage.get("prompt_tokens", 0)
+                completion_toks = usage.get("completion_tokens", 0)
                 llm_ctx.set_tokens(
-                    prompt=usage.get("prompt_tokens", 0),
-                    completion=usage.get("completion_tokens", 0)
+                    prompt=prompt_toks,
+                    completion=completion_toks
                 )
+                total_prompt_tokens += prompt_toks
+                total_completion_tokens += completion_toks
         
         choices = out.get("choices") or []
         if not choices:
@@ -309,6 +758,73 @@ def chat(req: ChatRequest):
                 )
             
             _dbg(f"Tool '{fn}' result keys={list(result_payload.keys())}")
+            
+            # Capture full query result from data_query_polars for frontend rendering
+            if fn == "data_query_polars":
+                _dbg(f"data_query_polars result: ok={result_payload.get('ok')}, type={type(result_payload)}")
+                if isinstance(result_payload, dict) and "ok" in result_payload and result_payload["ok"]:
+                    # Store the complete query result for frontend
+                    aggregated_query_data = {
+                        "data": result_payload["data"],
+                        "columns": result_payload["columns"],
+                        "rows": result_payload["rows"],
+                        "expression": result_payload.get("expression"),
+                        "ng_views": result_payload.get("ng_views"),
+                        "spatial_columns": result_payload.get("spatial_columns"),
+                    }
+                    aggregated_ng_views = result_payload.get("ng_views")
+                    _dbg(f"✅ Captured query data: {result_payload['rows']} rows, {len(result_payload['columns'])} columns for frontend rendering")
+                    
+                    # Optionally hide data from LLM to prevent it from summarizing
+                    if not SEND_DATA_TO_LLM:
+                        # Replace result_payload with minimal acknowledgment for LLM
+                        # CRITICAL: Include summary_id and spatial_columns so agent can use data_ng_annotations_from_data
+                        result_payload = {
+                            "ok": True,
+                            "rows": result_payload["rows"],
+                            "columns": result_payload["columns"],
+                            "expression": result_payload.get("expression"),
+                            "summary_id": result_payload.get("summary_id"),  # Required for annotations!
+                            "spatial_columns": result_payload.get("spatial_columns"),  # Indicates spatial data
+                            "message": "✅ Query executed successfully. Result saved as summary. If the user requested annotations or plots, continue with those tools using this summary_id."
+                        }
+                        _dbg(f"📦 Sending minimal acknowledgment to LLM (SEND_DATA_TO_LLM=False)")
+                else:
+                    _dbg(f"❌ data_query_polars result not captured - ok={result_payload.get('ok')}, keys={list(result_payload.keys())}")
+            
+            # Capture plot result from data_plot for frontend rendering
+            if fn == "data_plot":
+                _dbg(f"data_plot result: ok={result_payload.get('ok')}, type={type(result_payload)}")
+                if isinstance(result_payload, dict) and "ok" in result_payload and result_payload["ok"]:
+                    # Store the complete plot result for frontend
+                    aggregated_plot_data = {
+                        "plot_kwargs": result_payload["plot_kwargs"],
+                        "plot_id": result_payload.get("plot_id"),
+                        "plot_type": result_payload.get("plot_type"),
+                        "is_interactive": result_payload.get("is_interactive"),
+                        "row_count": result_payload.get("row_count"),
+                        "expression": result_payload.get("expression"),
+                        "source_id": result_payload.get("source_id"),
+                        "data": result_payload.get("data"),  # Include transformed data for frontend
+                        "ng_links_placeholder": result_payload.get("ng_links_placeholder"),
+                    }
+                    _dbg(f"✅ Captured plot data: type={result_payload['plot_type']}, interactive={result_payload['is_interactive']}")
+                    
+                    # Hide plot HTML from LLM (similar to query data)
+                    if not SEND_DATA_TO_LLM:
+                        result_payload = {
+                            "ok": True,
+                            "plot_id": result_payload.get("plot_id"),
+                            "plot_type": result_payload.get("plot_type"),
+                            "row_count": result_payload.get("row_count"),
+                            "message": "✅ Plot generated successfully. The interactive plot is being rendered in the workspace. Do NOT describe or summarize the plot - it's already displayed."
+                        }
+                        _dbg(f"📦 Sending minimal acknowledgment to LLM (SEND_DATA_TO_LLM=False)")
+                else:
+                    error_msg = result_payload.get('error', 'Unknown error')
+                    _dbg(f"❌ data_plot result not captured - ok={result_payload.get('ok')}, keys={list(result_payload.keys())}")
+                    _dbg(f"❌ data_plot error message: {error_msg}")
+            
             if fn == "data_ng_views_table" and isinstance(result_payload, dict):
                 if "error" in result_payload and "rows" not in result_payload:
                     # Surface error to client (Option A) & log details (Option C)
@@ -350,6 +866,31 @@ def chat(req: ChatRequest):
                 "content": truncated,
             })
         # Continue loop for next model reasoning pass
+    
+    # If we exhausted max_iters but still have pending tool results, get final response
+    if iteration == max_iters - 1:
+        # Check if last message is a tool result (not assistant)
+        if conversation and conversation[-1].get("role") == "tool":
+            _dbg("Max iterations reached but last message is tool result; making final LLM call")
+            iter_timing = timing.start_iteration(max_iters)
+            
+            with timing.llm_call(iter_timing, model=MODEL) as llm_ctx:
+                out = run_chat(conversation)
+                usage = out.get("usage", {})
+                if usage:
+                    llm_ctx.set_tokens(
+                        prompt=usage.get("prompt_tokens", 0),
+                        completion=usage.get("completion_tokens", 0)
+                    )
+            
+            choices = out.get("choices") or []
+            if choices:
+                msg = choices[0].get("message") or {}
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = _mask_ng_urls(content)
+                conversation.append(msg)
+                _dbg("Final response added after max_iters")
     
     timing.end_agent_loop()
     
@@ -409,18 +950,42 @@ def chat(req: ChatRequest):
     final_payload = {
         "model": "iterative",
         "choices": [{"index": 0, "message": final_assistant, "finish_reason": "stop"}],
-        "usage": {},
+        "usage": {
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens
+        },
         "mutated": overall_mutated,
         "state_link": state_link_block,
         "tool_trace": tool_execution_records,
         "views_table": aggregated_views_table,
+        "ng_views": aggregated_ng_views,  # Expose ng_views for frontend rendering
+        "query_data": aggregated_query_data,  # Expose full query result for frontend Tabulator rendering
+        "plot_data": aggregated_plot_data,  # Expose plot result for frontend rendering
     }
     
     timing.mark("response_sent")
     timing.finalize()
     
     _dbg(f"Returning payload mutated={overall_mutated} state_link?={bool(state_link_block)} views_table_rows={len((aggregated_views_table or {}).get('rows', [])) if aggregated_views_table else 0}")
+    _dbg(f"query_data present: {aggregated_query_data is not None}, rows: {aggregated_query_data.get('rows') if aggregated_query_data else 'N/A'}")
+    _dbg(f"plot_data present: {aggregated_plot_data is not None}, type: {aggregated_plot_data.get('plot_type') if aggregated_plot_data else 'N/A'}")
     return final_payload
+
+
+@app.get("/debug/test-logging")
+def debug_test_logging():
+    """Test endpoint to verify debug logging is working."""
+    logger.debug("🧪 DEBUG log from test endpoint")
+    logger.info("🧪 INFO log from test endpoint")
+    logger.warning("🧪 WARNING log from test endpoint")
+    _dbg("🧪 _dbg() call from test endpoint")
+    return {
+        "debug_enabled": DEBUG_ENABLED,
+        "log_level": logging.getLevelName(logger.level),
+        "root_level": logging.getLevelName(logging.getLogger().level),
+        "message": "Check your console for log messages"
+    }
 
 
 @app.get("/debug/tool_trace")
@@ -452,6 +1017,75 @@ def debug_timing(n: Optional[int] = None):
     }
 
 
+@app.get("/debug/logging-check")
+def debug_logging_check():
+    """Simple endpoint to test if debug logs appear in console."""
+    print("🔥 PRINT: debug_logging_check endpoint was called!")
+    logger.debug("🧪 DEBUG: This is a debug-level log")
+    logger.info("🧪 INFO: This is an info-level log")
+    logger.warning("🧪 WARNING: This is a warning-level log")
+    _dbg("🧪 _DBG: This is a _dbg() call")
+    
+    return {
+        "status": "ok",
+        "debug_enabled": DEBUG_ENABLED,
+        "logger_level": logging.getLevelName(logger.level),
+        "root_logger_level": logging.getLevelName(logging.getLogger().level),
+        "message": "Check your backend console for 5 log messages (1 print + 4 logs)"
+    }
+
+
+@app.post("/debug/next-prompt")
+def debug_next_prompt(req: ChatRequest):
+    """Show the full prompt that would be sent to the agent for the next message.
+    
+    This endpoint mimics the prompt assembly from /agent/chat but doesn't call the LLM.
+    Useful for debugging what context the agent sees.
+    
+    Args:
+        req: ChatRequest with conversation history (same format as /agent/chat)
+    
+    Returns:
+        JSON with the full assembled prompt including:
+        - System prompt
+        - State summary
+        - Data context
+        - Conversation history
+        - Character counts
+    """
+    # Assemble prompt exactly like /agent/chat does
+    state_summary = _summarize_state(CURRENT_STATE)
+    data_context = _data_context_block()
+    
+    base_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"Current viewer state summary:\n{state_summary}"},
+        {"role": "system", "content": data_context},
+    ]
+    conversation = base_messages + [m.model_dump() for m in req.messages]
+    
+    # Calculate character counts
+    system_prompt_chars = len(SYSTEM_PROMPT)
+    state_summary_chars = len(state_summary)
+    data_context_chars = len(data_context)
+    conversation_history_chars = sum(len(str(m.get("content", ""))) for m in [m.model_dump() for m in req.messages])
+    total_chars = system_prompt_chars + state_summary_chars + data_context_chars + conversation_history_chars
+    
+    return {
+        "messages": conversation,
+        "message_count": len(conversation),
+        "character_counts": {
+            "system_prompt": system_prompt_chars,
+            "state_summary": state_summary_chars,
+            "data_context": data_context_chars,
+            "conversation_history": conversation_history_chars,
+            "total": total_chars
+        },
+        "estimated_tokens": total_chars // 4,  # Rough estimate: 4 chars per token
+        "note": "This is what would be sent to the LLM on the next message"
+    }
+
+
 def _truncate_tool_output(obj, max_chars: int = 4000):
     import json as _json
     try:
@@ -461,9 +1095,25 @@ def _truncate_tool_output(obj, max_chars: int = 4000):
         return str(obj)[:max_chars]
 
 
+def _resolve_summary_id(summary_id: str | None) -> str | None:
+    """Resolve special summary_id values like 'last' to actual IDs.
+    
+    Allows users/LLM to reference the most recent query result without
+    needing to track the exact summary_id.
+    """
+    if summary_id == "last" or summary_id == "latest":
+        if LAST_QUERY_SUMMARY_ID:
+            _dbg(f"Resolved summary_id='{summary_id}' to '{LAST_QUERY_SUMMARY_ID}'")
+            return LAST_QUERY_SUMMARY_ID
+        else:
+            _dbg(f"summary_id='{summary_id}' requested but no previous query exists")
+            return None
+    return summary_id
+
+
 def _execute_tool_by_name(name: str, args: dict):
     """Dispatcher for internal tool execution (server-side)."""
-    # Directly call the endpoint functions; replicate FastAPI parameter handling
+    # Directly call the endpoint functions with Pydantic model instantiation
     try:
         if name == "ng_set_view":
             from .models import SetView
@@ -471,6 +1121,15 @@ def _execute_tool_by_name(name: str, args: dict):
         if name == "ng_set_lut":
             from .models import SetLUT
             return t_set_lut(SetLUT(**args))
+        if name == "ng_add_layer":
+            from .models import AddLayer
+            return t_add_layer(AddLayer(**args))
+        if name == "ng_set_layer_visibility":
+            from .models import SetLayerVisibility
+            return t_set_layer_visibility(SetLayerVisibility(**args))
+        if name == "ng_set_viewer_settings":
+            from .models import NgSetViewerSettings
+            return t_set_viewer_settings(NgSetViewerSettings(**args))
         if name == "ng_annotations_add":
             from .models import AddAnnotations
             return t_add_annotations(AddAnnotations(**args))
@@ -484,33 +1143,43 @@ def _execute_tool_by_name(name: str, args: dict):
             from .models import SaveState
             return t_save_state(SaveState())
         if name == "state_load":
-            link = args.get("link")
-            return t_state_load(link)
+            from .models import StateLoad
+            return t_state_load(StateLoad(**args))
         if name == "ng_state_summary":
-            detail = args.get("detail", "standard")
-            return t_state_summary(detail)
+            from .models import StateSummary
+            return t_state_summary(StateSummary(**args))
         if name == "ng_state_link":
             return t_state_link()
         if name == "data_list_files":
             return t_data_list_files()
+        if name == "data_info":
+            from .models import DataInfo
+            return t_data_info(DataInfo(**args))
         if name == "data_preview":
-            return t_data_preview(**args)
+            from .models import DataPreview
+            return t_data_preview(DataPreview(**args))
         if name == "data_describe":
-            return t_data_describe(**args)
-        if name == "data_select":
-            return t_data_select(**args)
+            from .models import DataDescribe
+            return t_data_describe(DataDescribe(**args))
         if name == "data_list_summaries":
             return t_data_list_summaries()
-        if name == "data_info":
-            return t_data_info(**args)
-        if name == "data_sample":
-            return t_data_sample(**args)
+        if name == "data_query_polars":
+            from .models import DataQuery
+            _dbg(f"Dispatching data_query_polars with args: {args}")
+            return t_data_query_polars(DataQuery(**args))
+        if name == "data_plot":
+            from .models import DataPlot
+            _dbg(f"Dispatching data_plot with args: {args}")
+            return t_data_plot(DataPlot(**args))
         if name == "data_ng_views_table":
-            return t_data_ng_views_table(**args)
-        if name == "ng_add_layer":
-            return t_add_layer(**args)
-        if name == "ng_set_layer_visibility":
-            return t_set_layer_visibility(**args)
+            from .models import NgViewsTable
+            return t_data_ng_views_table(NgViewsTable(**args))
+        if name == "data_ng_annotations_from_data":
+            from .models import NgAnnotationsFromData
+            _dbg(f"Dispatching data_ng_annotations_from_data with args: {args}")
+            return t_data_ng_annotations_from_data(NgAnnotationsFromData(**args))
+        if name == "data_list_plots":
+            return t_data_list_plots()
     except Exception as e:  # pragma: no cover
         logger.exception("Tool execution error")
         return {"error": str(e)}
@@ -523,9 +1192,18 @@ def _mask_ng_urls(text: str) -> str:
     Each distinct URL is collapsed to the label 'Updated Neuroglancer view'. If
     multiple different URLs appear, they will receive a numeric suffix to
     differentiate: 'Updated Neuroglancer view (2)', etc.
+    
+    Skips masking if the text already contains markdown table with [view](...) links
+    to avoid double-wrapping.
     """
-    logger.info(f"{text}")
     import re
+    
+    # Check if text contains markdown table with [view](...) links (from query results)
+    # Pattern: | ... | [view](https://...) |
+    if re.search(r'\|\s*\[view\]\(https?://[^\)]+\)\s*\|', text):
+        _dbg("Skipping URL masking - text contains markdown table with [view] links")
+        return text
+    
     url_pattern = re.compile(r"https?://[^\s)]+")
     candidates = url_pattern.findall(text)
     urls = [u for u in candidates if 'neuroglancer' in u]
@@ -612,7 +1290,8 @@ def summarize_state_struct(state, detail: str = "standard") -> dict:
                 if rng:
                     base["normalized_range"] = rng
             elif ltype == "annotation":
-                anns = (L.get("source") or {}).get("annotations") or []
+                # Annotations are now at layer level, not in source
+                anns = L.get("annotations") or []
                 base["annotation_count"] = len(anns)
         if detail == "full":
             shader = L.get("shader")
@@ -623,7 +1302,8 @@ def summarize_state_struct(state, detail: str = "standard") -> dict:
     annotation_layers = []
     for L in sd.get("layers", []):
         if L.get("type") == "annotation":
-            anns = (L.get("source") or {}).get("annotations") or []
+            # Annotations are now at layer level, not in source
+            anns = L.get("annotations") or []
             types = set()
             for a in anns:
                 t = a.get("type") or ("point" if "point" in a else None)
@@ -644,6 +1324,7 @@ def summarize_state_struct(state, detail: str = "standard") -> dict:
         "flags": {
             "showAxisLines": sd.get("showAxisLines"),
             "showScaleBar": sd.get("showScaleBar"),
+            "showDefaultAnnotations": sd.get("showDefaultAnnotations"),
         },
         "version": 1,
         "detail": detail,
@@ -651,8 +1332,8 @@ def summarize_state_struct(state, detail: str = "standard") -> dict:
 
 
 @app.post("/tools/ng_state_summary")
-def t_state_summary(detail: str = Body("standard", embed=True)):
-    return summarize_state_struct(CURRENT_STATE, detail=detail)
+def t_state_summary(args: StateSummary):
+    return summarize_state_struct(CURRENT_STATE, detail=args.detail)
 
 # ------------------- Data tool endpoints -------------------
 
@@ -669,15 +1350,25 @@ async def upload_file(file: UploadFile = File(...)):
 def t_data_list_files():
     return {"files": DATA_MEMORY.list_files()}
 
-@app.post("/tools/data_info")
-def t_data_info(file_id: str = Body(..., embed=True), sample_rows: int = Body(5, embed=True)):
+@app.post("/delete_file")
+def delete_file(file_id: str):
+    """Delete an uploaded file and all its derived summaries."""
     try:
-        df = DATA_MEMORY.get_df(file_id)
-        sample_rows = max(1, min(sample_rows, 20))
+        if DATA_MEMORY.remove_file(file_id):
+            return {"ok": True}
+        return {"ok": False, "error": "File not found"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.post("/tools/data_info")
+def t_data_info(args: DataInfo):
+    try:
+        df = DATA_MEMORY.get_df(args.file_id)
+        sample_rows = max(1, min(args.sample_rows, 20))
         sample = df.head(sample_rows).to_dicts()
         dtypes = {c: str(dt) for c, dt in zip(df.columns, df.dtypes)}
         return {
-            "file_id": file_id,
+            "file_id": args.file_id,
             "n_rows": df.height,
             "n_cols": df.width,
             "columns": df.columns,
@@ -688,69 +1379,21 @@ def t_data_info(file_id: str = Body(..., embed=True), sample_rows: int = Body(5,
         return {"error": str(e)}
 
 @app.post("/tools/data_preview")
-def t_data_preview(file_id: str = Body(..., embed=True), n: int = Body(10, embed=True)):
+def t_data_preview(args: DataPreview):
     try:
-        df = DATA_MEMORY.get_df(file_id)
-        n = max(1, min(n, 100))
-        return {"file_id": file_id, "rows": df.head(n).to_dicts(), "columns": df.columns}
+        df = DATA_MEMORY.get_df(args.file_id)
+        n = max(1, min(args.n, 100))
+        return {"file_id": args.file_id, "rows": df.head(n).to_dicts(), "columns": df.columns}
     except Exception as e:
         return {"error": str(e)}
 
 @app.post("/tools/data_describe")
-def t_data_describe(file_id: str = Body(..., embed=True)):
+def t_data_describe(args: DataDescribe):
     try:
-        df = DATA_MEMORY.get_df(file_id)
+        df = DATA_MEMORY.get_df(args.file_id)
         desc = df.describe()
-        meta = DATA_MEMORY.add_summary(file_id, "describe", desc, note="numeric describe")
+        meta = DATA_MEMORY.add_summary(args.file_id, "describe", desc, note="numeric describe")
         return {"summary": meta, "rows": desc.to_dicts()}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/tools/data_select")
-def t_data_select(
-    file_id: str = Body(..., embed=True),
-    columns: list[str] | None = Body(None, embed=True),
-    filters: list[dict] | None = Body(None, embed=True),
-    limit: int = Body(20, embed=True),
-):
-    try:
-        df = DATA_MEMORY.get_df(file_id)
-        if columns:
-            missing = [c for c in columns if c not in df.columns]
-            if missing:
-                return {"error": f"Unknown columns: {missing}"}
-            df = df.select(columns)
-        if filters:
-            exprs = []
-            for f in filters:
-                col = f.get("column")
-                op = f.get("op")
-                val = f.get("value")
-                if col not in df.columns:
-                    return {"error": f"Filter column not in dataframe: {col}"}
-                col_expr = pl.col(col)
-                if op == "==":
-                    exprs.append(col_expr == val)
-                elif op == "!=":
-                    exprs.append(col_expr != val)
-                elif op == ">":
-                    exprs.append(col_expr > val)
-                elif op == "<":
-                    exprs.append(col_expr < val)
-                elif op == ">=":
-                    exprs.append(col_expr >= val)
-                elif op == "<=":
-                    exprs.append(col_expr <= val)
-                else:
-                    return {"error": f"Unsupported op {op}"}
-            if exprs:
-                import functools, operator
-                combined = functools.reduce(operator.and_, exprs)
-                df = df.filter(combined)
-        limit = max(1, min(limit, 500))
-        subset = df.head(limit)
-        meta = DATA_MEMORY.add_summary(file_id, "select", subset, note="filtered/select preview")
-        return {"summary": meta, "preview_rows": subset.to_dicts()}
     except Exception as e:
         return {"error": str(e)}
 
@@ -759,57 +1402,225 @@ def t_data_list_summaries():
     return {"summaries": DATA_MEMORY.list_summaries()}
 
 
-@app.post("/tools/data_sample")
-def t_data_sample(
-    file_id: str = Body(..., embed=True),
-    n: int = Body(5, embed=True),
-    seed: int | None = Body(None, embed=True),
-    replace: bool = Body(False, embed=True),
-):
-    """Return a random sample of rows from a dataframe (without replacement by default).
+# ==============================================================================
+# Core Tool Logic Functions
+# ==============================================================================
+# These functions contain pure business logic and can be called from:
+# 1. HTTP endpoints (via wrapper functions below)
+# 2. Internal tool dispatcher (direct calls from LLM)
+# 
+# Benefits:
+# - No Body() object handling needed
+# - Easy to test without FastAPI
+# - Clean separation of HTTP concerns from business logic
+# - Reusable in other contexts (CLI, SDK, etc.)
+# ==============================================================================
 
-    Parameters:
-      file_id: ID of uploaded file
-      n: number of rows to sample (default 5, bounded 1..1000)
-      seed: optional integer seed for reproducibility (None => random)
-      replace: sample with replacement (default False)
+def execute_query_polars(
+    file_id: str | None = None,
+    summary_id: str | None = None,
+    expression: str = None,
+    save_as: str | None = None,
+    limit: int = 100
+) -> dict:
+    """Core logic for executing Polars expressions on dataframes.
+    
+    Pure business logic with no FastAPI dependencies. Can be called from
+    HTTP endpoints or internal dispatcher.
+    
+    Args:
+        file_id: Source file ID (mutually exclusive with summary_id)
+        summary_id: Source summary table ID (mutually exclusive with file_id)
+        expression: Polars expression to execute
+        save_as: Optional name to save result as summary table
+        limit: Maximum rows to return
+        
+    Returns:
+        Dict with result data or error message
     """
-    try:
-        df = DATA_MEMORY.get_df(file_id)
-        n = max(1, min(n, 1000))
-        if not replace and n > df.height:
-            n = df.height
-        # polars sample: shuffle=True ensures random order even when n==height
-        sampled = df.sample(n=n, with_replacement=replace, shuffle=True, seed=seed)
+    import polars as pl
+    
+    _dbg(f"execute_query_polars: file_id={repr(file_id)}, summary_id={repr(summary_id)}, save_as={repr(save_as)}, limit={limit}, expression={expression[:50] if expression else 'None'}...")
+    
+    # Get source dataframe
+    if file_id and summary_id:
         return {
-            "file_id": file_id,
-            "requested": n,
-            "returned": sampled.height,
-            "with_replacement": replace,
-            "seed": seed,
-            "rows": sampled.to_dicts(),
-            "columns": sampled.columns,
+            "error": f"Provide either file_id OR summary_id, not both. Received file_id='{str(file_id)}' and summary_id='{str(summary_id)}'. Use file_id for uploaded files or summary_id for previously saved results."
         }
-    except KeyError:
-        return {"error": f"Unknown file_id {file_id}"}
+    
+    if not file_id and not summary_id:
+        # Auto-select most recent file if available
+        files = DATA_MEMORY.list_files()
+        if files:
+            file_id = files[-1]["file_id"]  # Most recent file
+            _dbg(f"No file_id or summary_id provided, auto-using most recent file: {file_id}")
+        else:
+            summaries = DATA_MEMORY.list_summaries()
+            return {
+                "error": "No file_id or summary_id provided and no files uploaded.",
+                "available_summaries": [s["summary_id"] for s in summaries] if summaries else [],
+                "hint": "Upload a file first, or provide summary_id to query a saved result."
+            }
+    
+    try:
+        if file_id:
+            df = DATA_MEMORY.get_df(file_id)
+            source_id = file_id
+            if df is None:
+                return {"error": f"File '{file_id}' not found"}
+        else:
+            df = DATA_MEMORY.get_summary_df(summary_id)
+            source_id = summary_id
+            if df is None:
+                return {"error": f"Summary '{summary_id}' not found"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Failed to load dataframe: {e}"}
+    
+    # Auto-translate pandas syntax to Polars before execution
+    # This allows the LLM to use familiar pandas patterns while we use Polars internally
+    original_expression = expression
+    expression = _translate_pandas_to_polars(expression)
+    if expression != original_expression:
+        _dbg(f"Auto-translated: {original_expression[:80]} → {expression[:80]}")
+    
+    # Execute in restricted namespace (only Polars, no builtins)
+    namespace = {
+        'pl': pl,
+        'df': df,
+        '__builtins__': {}  # Critical: blocks import, open, eval, exec, etc.
+    }
+    
+    try:
+        result = eval(expression, namespace, {})
+        
+        # Handle different result types
+        if isinstance(result, pl.DataFrame):
+            # Standard DataFrame result
+            pass
+        elif isinstance(result, pl.Series):
+            # Convert Series to single-column DataFrame
+            result = pl.DataFrame({result.name or "value": result})
+        elif isinstance(result, list):
+            # List result (e.g., from .to_list()) - wrap in DataFrame
+            result = pl.DataFrame({"values": result})
+        elif isinstance(result, dict):
+            # Dict result - try to convert to DataFrame
+            try:
+                result = pl.DataFrame(result)
+            except Exception:
+                # If conversion fails, wrap the dict
+                result = pl.DataFrame({"result": [str(result)]})
+        elif isinstance(result, (int, float, str, bool, type(None))):
+            # Scalar result - wrap in DataFrame
+            result = pl.DataFrame({"result": [result]})
+        else:
+            return {
+                "error": f"Expression must return a DataFrame, Series, list, dict, or scalar value. Got {type(result).__name__}. "
+                "Hint: Remove .to_list() or .to_dict() and just return the DataFrame/Series."
+            }
+        
+        # Apply limit
+        if len(result) > limit:
+            result = result.limit(limit)
+            truncated = True
+        else:
+            truncated = False
+        
+        # Round numeric columns to 2 decimal places for readability
+        for col in result.columns:
+            if result[col].dtype in [pl.Float32, pl.Float64]:
+                result = result.with_columns(pl.col(col).round(2))
+        
+        # Detect spatial columns and generate Neuroglancer links
+        spatial_info = _detect_spatial_columns(result)
+        ng_links = None
+        if spatial_info and len(result) > 0 and len(result) <= 100:  # Only for reasonable row counts
+            spatial_cols, pattern = spatial_info
+            _dbg(f"Detected spatial columns: {spatial_cols} (pattern: {pattern})")
+            ng_links = _generate_ng_links_for_rows(result, spatial_cols)
+            _dbg(f"Generated {len([l for l in ng_links if l])} NG links")
+        
+        # Always save query results (auto-save if save_as not provided)
+        global LAST_QUERY_SUMMARY_ID
+        
+        if not save_as:
+            # Auto-generate a summary name based on timestamp
+            import time
+            save_as = f"query_{int(time.time() * 1000) % 1000000}"  # Last 6 digits of timestamp
+        
+        summary_meta = DATA_MEMORY.add_summary(source_id, "query", result, note=f"Query: {expression[:100]}")
+        summary_id = summary_meta["summary_id"]
+        LAST_QUERY_SUMMARY_ID = summary_id  # Track for 'last' reference
+        
+        _dbg(f"Query result auto-saved as summary_id: {summary_id}")
+        
+        # Return result with hint about reusing data
+        return_data = {
+            "ok": True,
+            "data": result.to_dict(as_series=False),
+            "rows": len(result),
+            "columns": result.columns,
+            "truncated": truncated,
+            "summary_id": summary_id,  # Always include the auto-saved summary_id
+            "saved_as": save_as,
+            "expression": expression  # Include the expression for code formatting
+        }
+        
+        # Add structured NG views if generated (hybrid approach: backend provides URLs, frontend renders)
+        if ng_links:
+            # Convert to structured format with row indices
+            return_data["ng_views"] = [
+                {"row_index": i, "url": url} 
+                for i, url in enumerate(ng_links) if url
+            ]
+            return_data["spatial_columns"] = spatial_info[0]
+        
+        # Add message about how to use the saved result
+        if len(result) > 0:
+            return_data["message"] = f"✅ Query executed successfully. Data is being rendered in an interactive table widget. Do NOT format, display, or summarize the data - it's already handled by the frontend. Result saved as summary_id='{summary_id}' ({len(result)} rows). You can use this summary_id in follow-up tools like data_ng_annotations_from_data, data_plot, or for further queries."
+        else:
+            return_data["message"] = f"✅ Query executed successfully (0 rows). Result saved as summary_id='{summary_id}'."
+        
+        return return_data
+    
+    except NameError as e:
+        _dbg(f"NameError in expression: {e}")
+        return {"error": f"Invalid expression: {e}. Only 'df' and 'pl' are available."}
+    except SyntaxError as e:
+        _dbg(f"SyntaxError in expression: {e}")
+        return {"error": f"Syntax error in expression: {e}"}
+    except AttributeError as e:
+        _dbg(f"AttributeError in expression: {e}")
+        error_str = str(e)
+        # Provide explicit fix for common Polars syntax errors
+        if "has no attribute 'groupby'" in error_str or "'groupby'" in error_str:
+            return {"error": f"Polars syntax error: {e}. Fix: Use group_by() NOT groupby(). Example: df.group_by('cell_id').agg(pl.first('x'))"}
+        elif "has no attribute 'distinct'" in error_str or "'distinct'" in error_str:
+            return {"error": f"Polars syntax error: {e}. Fix: Use .unique() NOT .distinct(). Example: df.select(pl.col('gene').unique())"}
+        else:
+            return {"error": f"AttributeError: {e}. Check Polars syntax - use group_by (not groupby), unique() (not distinct()), descending=True (not reverse=True)"}
+    except Exception as e:
+        _dbg(f"Exception executing expression: {type(e).__name__}: {e}")
+        return {"error": f"Expression execution failed: {type(e).__name__}: {e}"}
+
+
+@app.post("/tools/data_query_polars")
+def t_data_query_polars(args: DataQuery):
+    """HTTP endpoint wrapper for data_query_polars.
+    
+    Extracts parameters from Pydantic model and delegates to core logic.
+    """
+    return execute_query_polars(
+        file_id=args.file_id,
+        summary_id=args.summary_id,
+        expression=args.expression,
+        save_as=args.save_as,
+        limit=args.limit
+    )
 
 
 @app.post("/tools/data_ng_views_table")
-def t_data_ng_views_table(
-    file_id: str | None = Body(None, embed=True),
-    summary_id: str | None = Body(None, embed=True),
-    sort_by: str | None = Body(None, embed=True),
-    descending: bool = Body(True, embed=True),
-    top_n: int = Body(5, embed=True),
-    id_column: str = Body("cell_id", embed=True),
-    center_columns: list[str] = Body(["x","y","z"], embed=True),
-    include_columns: list[str] | None = Body(None, embed=True),
-    lut: dict | None = Body(None, embed=True),
-    annotations: bool = Body(False, embed=True),
-    link_label_column: str | None = Body(None, embed=True),
-):
+def t_data_ng_views_table(args: NgViewsTable):
     """Generate multiple Neuroglancer view links (not persisted) and return a table.
 
     Strategy: mutate state sequentially but finalize CURRENT_STATE to the FIRST view
@@ -819,43 +1630,23 @@ def t_data_ng_views_table(
     from copy import deepcopy
     global CURRENT_STATE
     warnings: list[str] = []
-    # Defensive: the default FastAPI Body(...) object (FieldInfo) is bound when we call this function directly.
-    # We do NOT want to stringify it (that produced spurious 'Unknown summary_id: annotation=...' errors).
-    from fastapi import params as _fastapi_params  # type: ignore
-    # Treat any non-string or FieldInfo-derived object as None.
-    if not isinstance(file_id, str) or isinstance(file_id, _fastapi_params.Body):
-        file_id = None
-    if not isinstance(summary_id, str) or isinstance(summary_id, _fastapi_params.Body) or (
-        isinstance(summary_id, str) and "alias='summary_id'" in summary_id
-    ):
-        summary_id = None
-    # Sanitize other params that may still be FastAPI Body objects when internal dispatcher bypasses validation
-    if isinstance(lut, _fastapi_params.Body):
-        lut = None
-    if isinstance(include_columns, _fastapi_params.Body):
-        include_columns = None
-    if isinstance(center_columns, _fastapi_params.Body) or not isinstance(center_columns, (list, tuple)):
-        center_columns = ["x","y","z"]
-    if isinstance(id_column, _fastapi_params.Body) or not isinstance(id_column, str):
-        id_column = "cell_id"
-    if isinstance(link_label_column, _fastapi_params.Body):
-        link_label_column = None
-    if isinstance(sort_by, _fastapi_params.Body):
-        sort_by = None
-    if isinstance(descending, _fastapi_params.Body):
-        descending = True
-    if isinstance(top_n, _fastapi_params.Body):
-        top_n = 5
-    if isinstance(annotations, _fastapi_params.Body):
-        annotations = False
+    
+    # Extract parameters from Pydantic model
+    file_id = args.file_id
+    summary_id = args.summary_id
+    sort_by = args.sort_by
+    descending = args.descending
+    top_n = args.top_n
+    id_column = args.id_column
+    center_columns = args.center_columns
+    include_columns = args.include_columns
+    lut = args.lut
+    annotations = args.annotations
+    link_label_column = args.link_label_column
+    
     if DEBUG_ENABLED:
-        _dbg(f"Normalized ids -> file_id={file_id} summary_id={summary_id}")
-        _dbg(
-            "Sanitized params types: "
-            f"sort_by={type(sort_by).__name__} descending={type(descending).__name__} top_n={type(top_n).__name__} "
-            f"id_column={type(id_column).__name__} center_columns={type(center_columns).__name__} include_columns={type(include_columns).__name__} "
-            f"lut={type(lut).__name__} annotations={type(annotations).__name__} link_label_column={type(link_label_column).__name__}"
-        )
+        _dbg(f"NgViewsTable params -> file_id={file_id} summary_id={summary_id}")
+    
     if not file_id and not summary_id:
         return {"error": "Must provide file_id or summary_id"}
     try:
@@ -959,4 +1750,457 @@ def t_data_ng_views_table(
         }
     except Exception as e:
         import traceback
+        error_trace = traceback.format_exc()
+        logger.error(f"data_ng_annotations_from_data exception: {type(e).__name__}: {e}")
+        _dbg(f"Exception trace: {error_trace}")
+        return {"error": str(e), "trace": error_trace}
+
+
+@app.post("/tools/data_ng_annotations_from_data")
+def t_data_ng_annotations_from_data(args: NgAnnotationsFromData):
+    """Create Neuroglancer annotations directly from dataframe rows.
+    
+    Each row in the source dataframe becomes one annotation. This is the preferred
+    way to add annotations from tabular data (rather than data_query_polars + ng_annotations_add
+    which doesn't work due to data isolation).
+    """
+    global CURRENT_STATE
+    
+    file_id = args.file_id
+    summary_id = _resolve_summary_id(args.summary_id)  # Resolve 'last' or 'latest' to actual ID
+    layer_name = args.layer_name
+    annotation_type = args.annotation_type
+    center_columns = args.center_columns
+    size_columns = args.size_columns
+    id_column = args.id_column
+    color = args.color
+    filter_expression = args.filter_expression
+    limit = args.limit
+    
+    if DEBUG_ENABLED:
+        _dbg(f"data_ng_annotations_from_data -> file_id={file_id} summary_id={summary_id} layer={layer_name}")
+    
+    # Validate inputs
+    if not file_id and not summary_id:
+        # Always default to most recent file (never auto-select summary_id)
+        files = DATA_MEMORY.list_files()
+        if files:
+            file_id = files[-1]["file_id"]
+            _dbg(f"No file_id or summary_id provided, defaulting to most recent file: {file_id}")
+        else:
+            error_msg = "No file_id provided and no files uploaded"
+            logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+            return {"error": error_msg}
+    
+    if file_id and summary_id:
+        error_msg = "Provide either file_id OR summary_id, not both"
+        logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+        return {"error": error_msg}
+    
+    try:
+        # Get source dataframe
+        if file_id:
+            df = DATA_MEMORY.get_df(file_id)
+            source_fid = file_id
+            _dbg(f"Loaded dataframe from file_id={file_id}, shape={df.height}x{df.width}, columns={df.columns}")
+        else:
+            df = DATA_MEMORY.get_summary_df(summary_id)
+            source_fid = DATA_MEMORY.get_summary_record(summary_id).source_file_id
+            _dbg(f"Loaded dataframe from summary_id={summary_id}, shape={df.height}x{df.width}, columns={df.columns}")
+        
+        # Apply filter expression if provided
+        if filter_expression:
+            # Auto-translate pandas syntax to Polars
+            original_filter = filter_expression
+            filter_expression = _translate_pandas_to_polars(filter_expression)
+            if filter_expression != original_filter:
+                _dbg(f"Auto-translated filter: {original_filter[:80]} → {filter_expression[:80]}")
+            
+            _dbg(f"Applying filter_expression: {filter_expression[:200]}")
+            try:
+                namespace = {'pl': pl, 'df': df, '__builtins__': {}}
+                result = eval(filter_expression, namespace, {})
+                
+                if isinstance(result, pl.DataFrame):
+                    df = result
+                    _dbg(f"Filter applied, new shape={df.height}x{df.width}")
+                elif isinstance(result, pl.Series):
+                    df = pl.DataFrame({result.name or "value": result})
+                    _dbg(f"Filter returned Series, converted to DataFrame, shape={df.height}x{df.width}")
+                else:
+                    error_msg = f"filter_expression must return a DataFrame or Series, got {type(result).__name__}"
+                    logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+                    return {"error": error_msg}
+            except Exception as e:
+                error_msg = f"filter_expression failed: {e}"
+                
+                # Check if it's a boolean indexing error and provide helpful guidance
+                error_str = str(e)
+                if "expected" in error_str and "values when selecting columns by boolean mask" in error_str:
+                    error_msg += "\n\n💡 TIP: Use Polars .filter() syntax for filtering:"
+                    error_msg += "\n  ✅ CORRECT: df.filter(pl.col('gene') == 'Calb2')"
+                    error_msg += "\n  ✅ CORRECT: df.filter((pl.col('a') > 5) & (pl.col('b') == 'x'))"
+                    error_msg += "\n  ❌ WRONG: df[df['gene'] == 'Calb2']  # pandas-style doesn't work"
+                    error_msg += "\n\nNote: Auto-translation should handle this, but explicit Polars syntax is preferred."
+                
+                logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+                _dbg(f"Filter expression error details: {type(e).__name__}: {e}")
+                return {"error": error_msg}
+        
+        # Validate required columns exist
+        missing_cols = [c for c in center_columns if c not in df.columns]
+        if missing_cols:
+            error_msg = f"Missing required center columns: {missing_cols}. Available columns: {df.columns}"
+            logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+            _dbg(f"Column validation failed. Needed: {center_columns}, Available: {df.columns}")
+            return {"error": f"Missing required center columns: {missing_cols}", "available_columns": df.columns}
+        
+        if annotation_type in ["box", "ellipsoid"] and not size_columns:
+            error_msg = f"annotation_type '{annotation_type}' requires size_columns parameter"
+            logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+            return {"error": error_msg}
+        
+        if size_columns:
+            missing_size_cols = [c for c in size_columns if c not in df.columns]
+            if missing_size_cols:
+                error_msg = f"Missing size columns: {missing_size_cols}. Available columns: {df.columns}"
+                logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+                return {"error": f"Missing size columns: {missing_size_cols}", "available_columns": df.columns}
+        
+        # Limit rows
+        if df.height > limit:
+            _dbg(f"Limiting from {df.height} to {limit} rows")
+            df = df.head(limit)
+        
+        # Create annotation layer if it doesn't exist, or ensure it exists with color
+        layer_exists = any(L.get("name") == layer_name and L.get("type") == "annotation" 
+                          for L in CURRENT_STATE.data.get("layers", []))
+        
+        if not layer_exists:
+            CURRENT_STATE.add_layer(layer_name, "annotation", annotation_color=color)
+            _dbg(f"Created annotation layer '{layer_name}' with color {color}")
+        elif color:
+            # Update color on existing layer
+            for L in CURRENT_STATE.data.get("layers", []):
+                if L.get("name") == layer_name and L.get("type") == "annotation":
+                    L["annotationColor"] = color
+                    _dbg(f"Updated color on existing layer '{layer_name}' to {color}")
+                    break
+        
+        # Build annotation items from dataframe rows
+        # Check if state has time dimension - if so, add 4th coordinate (default to 0)
+        has_time_dim = 't' in CURRENT_STATE.data.get('dimensions', {})
+        
+        items = []
+        for idx, row in enumerate(df.to_dicts()):
+            try:
+                cx = float(row[center_columns[0]])
+                cy = float(row[center_columns[1]])
+                cz = float(row[center_columns[2]])
+                
+                # Generate unique ID: prefer id_column if provided, otherwise generate UUID
+                if id_column and id_column in row:
+                    ann_id = str(row[id_column])
+                else:
+                    import uuid
+                    ann_id = str(uuid.uuid4())
+                
+                if annotation_type == "point":
+                    # If state has time dimension, include 4th coordinate (default to 0)
+                    point_coords = [cx, cy, cz, 0] if has_time_dim else [cx, cy, cz]
+                    items.append({
+                        "point": point_coords,
+                        "type": "point",
+                        "id": ann_id
+                    })
+                elif annotation_type == "box":
+                    sx = float(row[size_columns[0]])
+                    sy = float(row[size_columns[1]])
+                    sz = float(row[size_columns[2]])
+                    # For boxes, add time coord to both points if needed
+                    if has_time_dim:
+                        items.append({
+                            "type": "axis_aligned_bounding_box",
+                            "pointA": [cx - sx/2, cy - sy/2, cz - sz/2, 0],
+                            "pointB": [cx + sx/2, cy + sy/2, cz + sz/2, 0],
+                            "id": ann_id
+                        })
+                    else:
+                        items.append({
+                            "type": "axis_aligned_bounding_box",
+                            "pointA": [cx - sx/2, cy - sy/2, cz - sz/2],
+                            "pointB": [cx + sx/2, cy + sy/2, cz + sz/2],
+                            "id": ann_id
+                        })
+                elif annotation_type == "ellipsoid":
+                    rx = float(row[size_columns[0]]) / 2
+                    ry = float(row[size_columns[1]]) / 2
+                    rz = float(row[size_columns[2]]) / 2
+                    # Ellipsoids use center, add time if needed
+                    center_coords = [cx, cy, cz, 0] if has_time_dim else [cx, cy, cz]
+                    items.append({
+                        "type": "ellipsoid",
+                        "center": center_coords,
+                        "radii": [rx, ry, rz],
+                        "id": ann_id
+                    })
+            except Exception as e:
+                _dbg(f"Skipping row {idx} due to error: {e}")
+                continue
+        
+        if not items:
+            error_msg = f"No valid annotation items created from dataframe (df had {df.height} rows)"
+            logger.error(f"data_ng_annotations_from_data error: {error_msg}")
+            _dbg(f"Failed to create annotations - check row iteration and column values")
+            return {"error": "No valid annotation items created from dataframe"}
+        
+        # Add annotations to the layer
+        CURRENT_STATE.add_annotations(layer_name, items)
+        
+        _dbg(f"✅ Successfully added {len(items)} annotations to layer '{layer_name}'")
+        logger.info(f"Added {len(items)} annotation points to layer '{layer_name}'")
+        
+        return {
+            "ok": True,
+            "layer": layer_name,
+            "annotation_type": annotation_type,
+            "count": len(items),
+            "source": source_fid,
+            "message": f"✅ Added {len(items)} {annotation_type} annotations to layer '{layer_name}'"
+        }
+        
+    except Exception as e:
+        import traceback
+        logger.exception("data_ng_annotations_from_data error")
         return {"error": str(e), "trace": traceback.format_exc()}
+
+
+# ==============================================================================
+# Plotting Tools
+# ==============================================================================
+
+def execute_plot(
+    file_id: str | None = None,
+    summary_id: str | None = None,
+    plot_type: str = "scatter",
+    x: str = None,
+    y: str = None,
+    by: str | None = None,
+    size: str | None = None,
+    color: str | None = None,
+    stacked: bool = False,
+    title: str | None = None,
+    expression: str | None = None,
+    save_plot: bool = True,
+    width: int = 700,
+    height: int = 400,
+    interactive_override: bool | None = None
+) -> dict:
+    """Core logic for generating plot specifications from dataframes.
+    
+    Returns plot parameters and data reference so frontend can render natively in Panel.
+    
+    Args:
+        file_id: Source file ID (mutually exclusive with summary_id)
+        summary_id: Source summary table ID (mutually exclusive with file_id)
+        plot_type: 'scatter', 'line', 'bar', or 'heatmap'
+        x: X-axis column name
+        y: Y-axis column name
+        by: Grouping column
+        size: Point size column (scatter only)
+        color: Point color column (scatter only)
+        stacked: Stack bars (bar only)
+        title: Plot title
+        expression: Optional Polars expression to transform data first
+        save_plot: Store plot in DataMemory
+        width: Plot width in pixels
+        height: Plot height in pixels
+        interactive_override: Force interactive on/off (None = auto)
+        
+    Returns:
+        Dict with plot_kwargs, source_id, and metadata or error
+    """
+    from .tools.plotting import validate_plot_requirements, build_plot_spec
+    
+    _dbg(f"execute_plot: file_id={file_id}, summary_id={summary_id}, plot_type={plot_type}, x={x}, y={y}")
+    
+    # Validate inputs
+    if not x or not y:
+        return {"error": "Both 'x' and 'y' parameters are required"}
+    
+    if file_id and summary_id:
+        return {"error": "Provide either file_id OR summary_id, not both"}
+    
+    # Auto-select most recent file if neither provided
+    if not file_id and not summary_id:
+        files = DATA_MEMORY.list_files()
+        if files:
+            file_id = files[-1]["file_id"]
+            _dbg(f"Auto-selected most recent file: {file_id}")
+        else:
+            return {"error": "No file_id or summary_id provided and no files uploaded"}
+    
+    # Get source dataframe
+    try:
+        if file_id:
+            df = DATA_MEMORY.get_df(file_id)
+            source_id = file_id
+        else:
+            df = DATA_MEMORY.get_summary_df(summary_id)
+            source_id = summary_id
+    except Exception as e:
+        return {"error": f"Failed to load dataframe: {e}"}
+    
+    # Apply expression if provided
+    if expression:
+        # Auto-translate pandas syntax to Polars
+        original_expr = expression
+        expression = _translate_pandas_to_polars(expression)
+        if expression != original_expr:
+            _dbg(f"Auto-translated plot expression: {original_expr[:80]} → {expression[:80]}")
+        
+        _dbg(f"Applying expression before plotting: {expression[:100]}")
+        try:
+            namespace = {'pl': pl, 'df': df, '__builtins__': {}}
+            result = eval(expression, namespace, {})
+            
+            if isinstance(result, pl.DataFrame):
+                df = result
+            elif isinstance(result, pl.Series):
+                df = pl.DataFrame({result.name or "value": result})
+            else:
+                return {"error": f"Expression must return a DataFrame or Series, got {type(result).__name__}"}
+        except Exception as e:
+            return {"error": f"Expression execution failed: {e}"}
+    
+    # Ensure spatial columns are included if they exist and aren't already
+    spatial_info = _detect_spatial_columns(df)
+    if spatial_info:
+        spatial_cols, pattern = spatial_info
+        # Check if all spatial columns are present
+        missing_spatial = [c for c in spatial_cols if c not in df.columns]
+        if missing_spatial:
+            _dbg(f"Spatial columns detected in source but missing after expression: {missing_spatial}")
+    
+    # Validate plot requirements
+    params = {'x': x, 'y': y, 'by': by, 'size': size, 'color': color}
+    validation = validate_plot_requirements(df, plot_type, params)
+    
+    if not validation['valid']:
+        return {
+            "error": "Plot validation failed",
+            "issues": validation['issues'],
+            "suggestions": validation['suggestions']
+        }
+    
+    # Build plot specification
+    plot_result = build_plot_spec(
+        df=df,
+        plot_type=plot_type,
+        x=x,
+        y=y,
+        by=by,
+        size=size,
+        color=color,
+        stacked=stacked,
+        title=title,
+        width=width,
+        height=height,
+        interactive_override=interactive_override
+    )
+    
+    if 'error' in plot_result:
+        return plot_result
+    
+    # Store plot spec if requested
+    plot_id = None
+    if save_plot:
+        plot_spec = plot_result['plot_kwargs'].copy()
+        plot_spec['plot_type'] = plot_type
+        plot_meta = DATA_MEMORY.add_plot(
+            source_id=source_id,
+            plot_type=plot_type,
+            plot_html="",  # No HTML, frontend will render
+            plot_spec=plot_spec,
+            expression=expression
+        )
+        plot_id = plot_meta['plot_id']
+    
+    # Convert transformed dataframe to dict format for frontend
+    plot_data_rows = df.to_dicts()
+    
+    return {
+        "ok": True,
+        "plot_id": plot_id,
+        "plot_kwargs": plot_result['plot_kwargs'],
+        "plot_type": plot_result['plot_type'],
+        "is_interactive": plot_result['is_interactive'],
+        "row_count": plot_result['row_count'],
+        "ng_links_placeholder": plot_result.get('ng_links_placeholder'),
+        "expression": expression,
+        "source_id": source_id,
+        "data": plot_data_rows,  # Send the transformed data directly
+        "warnings": validation.get('suggestions', [])
+    }
+
+
+@app.post("/tools/data_plot")
+def t_data_plot(args: DataPlot):
+    """HTTP endpoint wrapper for data_plot.
+    
+    Generates interactive plot from dataframe data.
+    """
+    return execute_plot(
+        file_id=args.file_id,
+        summary_id=args.summary_id,
+        plot_type=args.plot_type,
+        x=args.x,
+        y=args.y,
+        by=args.by,
+        size=args.size,
+        color=args.color,
+        stacked=args.stacked,
+        title=args.title,
+        expression=args.expression,
+        save_plot=args.save_plot,
+        width=args.width,
+        height=args.height,
+        interactive_override=args.interactive_override
+    )
+
+
+@app.post("/tools/data_list_plots")
+def t_data_list_plots():
+    """List all generated plots (metadata only)."""
+    return {"plots": DATA_MEMORY.list_plots()}
+
+
+# ==============================================================================
+# End Plotting Tools
+# ==============================================================================
+
+@app.get("/debug/raw_state")
+def debug_raw_state():
+    """Return the raw CURRENT_STATE data structure for debugging."""
+    return CURRENT_STATE.as_dict()
+
+@app.post("/system/reset")
+def system_reset():
+    """Reset the entire application state - clear all memory, data, and chat history."""
+    global CURRENT_STATE, DATA_MEMORY, INTERACTION_MEMORY, _TRACE_HISTORY, LAST_QUERY_SUMMARY_ID
+    
+    logger.info("System reset requested - clearing all state")
+    
+    # Reset all global state variables to fresh instances
+    CURRENT_STATE = NeuroglancerState()
+    DATA_MEMORY = DataMemory()
+    INTERACTION_MEMORY = InteractionMemory()
+    _TRACE_HISTORY = []
+    LAST_QUERY_SUMMARY_ID = None
+    
+    logger.info("System reset complete - all memory flushed")
+    
+    return {
+        "status": "success",
+        "message": "Application state has been reset. All data, chat history, and memory have been cleared."
+    }

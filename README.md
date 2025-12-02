@@ -24,6 +24,8 @@ uv run python -m panel serve panel\panel_app.py --autoreload --port 8006 --addre
 ```
 + open browser: http://localhost:8006
 
++ debug mode: $env:NEUROGABBER_DEBUG = "1" 
+
     
 
 ### Quick start with launch scripts:
@@ -35,6 +37,8 @@ uv run python -m panel serve panel\panel_app.py --autoreload --port 8006 --addre
 ### Tests
     + `uv run -m coverage run -m pytest`
     + `uv run -m coverage report`
+
+    + Intergration test: C:/Users/matt.davis/code/neurogabber/.venv/Scripts/python.exe -m pytest tests/test_integration_query_with_links.py -v -s
 
 ## Installation
 To use the software, in the root directory, run
