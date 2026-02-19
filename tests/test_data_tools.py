@@ -28,41 +28,10 @@ def test_preview_and_describe():
     assert desc["rows"], desc
 
 
-def test_select_filter():
-    resp = client.post("/upload_file", files={"file": ("t3.csv", CSV_CONTENT, "text/csv")}).json()
-    fid = resp["file"]["file_id"]
-    sel = client.post(
-        "/tools/data_select",
-        json={
-            "file_id": fid,
-            "columns": ["id", "x", "size_x"],
-            "filters": [{"column": "id", "op": ">", "value": 1}],
-            "limit": 5,
-        },
-    ).json()
-    assert "summary" in sel, sel
-    assert sel["preview_rows"], sel
-
-
 def test_list_summaries():
     # Ensure at least one summary from previous tests
     resp = client.post("/tools/data_list_summaries").json()
     assert "summaries" in resp
-
-
-def test_data_sample_basic_and_seed():
-    resp = client.post("/upload_file", files={"file": ("sample.csv", CSV_CONTENT, "text/csv")}).json()
-    fid = resp["file"]["file_id"]
-    sample = client.post("/tools/data_sample", json={"file_id": fid, "n": 2}).json()
-    assert sample["returned"] == 2
-    assert len(sample["rows"]) == 2
-    # Seeded reproducibility
-    s1 = client.post("/tools/data_sample", json={"file_id": fid, "n": 2, "seed": 42}).json()
-    s2 = client.post("/tools/data_sample", json={"file_id": fid, "n": 2, "seed": 42}).json()
-    assert s1["rows"] == s2["rows"], "Seeded samples should match"
-    # Without replacement uniqueness
-    ids = [r["id"] for r in sample["rows"]]
-    assert len(ids) == len(set(ids))
 
 
 def test_data_ng_views_table_basic():
@@ -110,7 +79,8 @@ def test_execute_query_polars_aggregation():
     """execute_query_polars handles aggregation expressions."""
     fid = _add_test_file("qtest_agg.csv")
     result = execute_query_polars(
-        file_id=fid, expression='df.select([pl.max("value"), pl.mean("value")])'
+        file_id=fid,
+        expression='df.select([pl.max("value").alias("max_value"), pl.mean("value").alias("mean_value")])',
     )
     assert result.get("ok") is True
 

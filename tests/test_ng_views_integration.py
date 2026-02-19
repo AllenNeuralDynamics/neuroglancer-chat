@@ -57,7 +57,8 @@ def test_ng_views_in_chat_response():
 
 def test_frontend_table_enhancement():
     """Test the frontend's table enhancement function."""
-    # Import the function
+    import pytest
+    pytest.importorskip("panel_neuroglancer", reason="panel extras not installed")
     from neuroglancer_chat.panel.panel_app import _enhance_table_with_ng_views
     
     # Sample markdown table

@@ -1,5 +1,9 @@
 """Tests for _mask_client_side: prevents double-wrapping of Neuroglancer URLs."""
 
+import pytest
+
+pytest.importorskip("panel_neuroglancer", reason="panel extras not installed")
+
 from neuroglancer_chat.panel.panel_app import _mask_client_side
 
 _BASE = "https://neuroglancer-demo.appspot.com"

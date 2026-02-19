@@ -1,5 +1,9 @@
 """Tests for smart column truncation of wide markdown tables."""
 
+import pytest
+
+pytest.importorskip("panel_neuroglancer", reason="panel extras not installed")
+
 from neuroglancer_chat.panel.panel_app import _truncate_table_columns
 
 _WIDE_TABLE = """Query results:
