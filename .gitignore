@@ -138,5 +138,6 @@ dmypy.json
 # MacOs
 **/.DS_Store
 
-# ignore timing logs in src\neuroglancer_chat\logs
+# ignore timing logs
+logs/*.jsonl
 src/neuroglancer_chat/logs/agent_timing.jsonl
