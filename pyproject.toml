@@ -99,6 +99,10 @@ line_length = 79
 profile = "black"
 skip = [".conda"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
 [tool.interrogate]
 exclude = ["setup.py", "docs", "build", ".conda"]
 fail-under = 100
