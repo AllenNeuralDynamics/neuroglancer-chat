@@ -99,8 +99,8 @@ use_streaming = False  # Line ~244
 ```
 
 ### Test Streaming
-1. Restart backend: `.\start_backend.ps1 -Timing`
-2. Restart panel: `.\start_panel.ps1`
+1. Restart backend: `.\scripts\start_backend.ps1 -Timing`
+2. Restart panel: `.\scripts\start_panel.ps1`
 3. Send a chat message
 4. Observe tokens appearing progressively
 

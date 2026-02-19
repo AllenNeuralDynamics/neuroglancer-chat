@@ -153,7 +153,7 @@ Each request produces a comprehensive timing record:
 
 **PowerShell (Windows):**
 ```powershell
-.\start.ps1 -Timing
+.\scripts\start_backend.ps1 -Timing
 ```
 
 #### Option 2: Environment Variable

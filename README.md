@@ -29,10 +29,9 @@ uv run python -m panel serve panel\panel_app.py --autoreload --port 8006 --addre
     
 
 ### Quick start with launch scripts:
-+ Bash: `./start.sh` or `./start.sh --timing` (enable performance monitoring)
-+ PowerShell: `.\start.ps1` or `.\start.ps1 -Timing` (enable performance monitoring)
-+ `.\start_backend.ps1` or `.\start_backend.ps1 -Timing`
-+ `.\start_panel.ps1` 
++ Backend: `.\scripts\start_backend.ps1` or `.\scripts\start_backend.ps1 -Timing` (enable performance monitoring)
++ Frontend: `.\scripts\start_panel.ps1` or `.\scripts\start_panel.ps1 -Streaming`
++ Stop all: `.\scripts\kill_app.ps1`
 
 ### Tests
     + `uv run -m coverage run -m pytest`

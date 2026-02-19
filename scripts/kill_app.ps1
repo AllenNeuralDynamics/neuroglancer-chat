@@ -37,9 +37,9 @@ else
     Write-Host "  No Python processes found" -ForegroundColor Gray
 }
 
-# Check for processes using ports 8000 (backend) and 5006 (frontend)
+# Check for processes using ports 8000 (backend) and 8006 (frontend)
 Write-Host ""
-Write-Host "Checking ports 8000 and 5006..." -ForegroundColor Cyan
+Write-Host "Checking ports 8000 and 8006..." -ForegroundColor Cyan
 
 $port8000 = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
 if ($port8000)
@@ -54,19 +54,19 @@ else
     Write-Host "  Port 8000 is free" -ForegroundColor Gray
 }
 
-$port5006 = Get-NetTCPConnection -LocalPort 5006 -ErrorAction SilentlyContinue
-if ($port5006)
+$port8006 = Get-NetTCPConnection -LocalPort 8006 -ErrorAction SilentlyContinue
+if ($port8006)
 {
-    $pid5006 = $port5006.OwningProcess | Select-Object -First 1
-    Write-Host "  Killing process on port 5006 (PID: $pid5006)" -ForegroundColor Gray
-    Stop-Process -Id $pid5006 -Force -ErrorAction SilentlyContinue
-    Write-Host "Port 5006 freed" -ForegroundColor Green
+    $pid8006 = $port8006.OwningProcess | Select-Object -First 1
+    Write-Host "  Killing process on port 8006 (PID: $pid8006)" -ForegroundColor Gray
+    Stop-Process -Id $pid8006 -Force -ErrorAction SilentlyContinue
+    Write-Host "Port 8006 freed" -ForegroundColor Green
 }
 else
 {
-    Write-Host "  Port 5006 is free" -ForegroundColor Gray
+    Write-Host "  Port 8006 is free" -ForegroundColor Gray
 }
 
 Write-Host ""
 Write-Host "All Neuroglancer-Chat processes stopped!" -ForegroundColor Green
-Write-Host "You can now restart the app with start_backend.ps1 and start_panel.ps1" -ForegroundColor Yellow
+Write-Host "You can now restart the app with scripts\start_backend.ps1 and scripts\start_panel.ps1" -ForegroundColor Yellow

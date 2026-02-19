@@ -9,8 +9,7 @@ param(
 $env:BACKEND = "http://127.0.0.1:8000"
 
 # set debug
-$env:NEUROGLANCER_CHAT_DEBUG = "1"
-
+$env:NEUROGLANCER_CHAT_DEBUG = "0"
 
 # Start backend in foreground
 Write-Host "Starting backend on http://127.0.0.1:8000..." -ForegroundColor Green
@@ -26,14 +25,14 @@ if ($Timing) {
 }
 
 # Change to backend directory
-Set-Location "$PSScriptRoot\src\neuroglancer_chat"
+Set-Location (Resolve-Path "$PSScriptRoot\..\src\neuroglancer_chat")
 
 # If debug mode is enabled, set uvicorn log level to debug
 # Set limit-max-requests to 500MB for large CSV uploads
 if ($env:NEUROGLANCER_CHAT_DEBUG -eq "1") {
     Write-Host "Debug mode ENABLED - agent loop debug logging active" -ForegroundColor Magenta
-    uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-level debug --limit-max-requests 10000 --timeout-keep-alive 300
+    uv run python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-level debug --limit-max-requests 10000 --timeout-keep-alive 300
 } else {
-    uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --limit-max-requests 10000 --timeout-keep-alive 300
+    uv run python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --limit-max-requests 10000 --timeout-keep-alive 300
 }
 Write-Host ""
