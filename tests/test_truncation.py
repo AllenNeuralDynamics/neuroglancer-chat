@@ -1,8 +1,12 @@
-"""Test smart column truncation for wide tables."""
-from neurogabber.panel.panel_app import _truncate_table_columns
+"""Tests for smart column truncation of wide markdown tables."""
 
-# Test with a wide table
-wide_table = """Query results:
+import pytest
+
+pytest.importorskip("panel_neuroglancer", reason="panel extras not installed")
+
+from neuroglancer_chat.panel.panel_app import _truncate_table_columns
+
+_WIDE_TABLE = """Query results:
 
 | id | cell_id | x | y | z | mean_intensity | max_intensity | volume | area | perimeter | circularity | eccentricity | cluster | marker | View |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -12,36 +16,7 @@ wide_table = """Query results:
 
 Total: 3 cells."""
 
-print("ORIGINAL TABLE:")
-print("=" * 80)
-print(wide_table)
-print("\n" + "=" * 80)
-
-truncated, was_truncated, all_cols = _truncate_table_columns(wide_table, max_cols=5)
-
-print(f"\nWAS TRUNCATED: {was_truncated}")
-print(f"ALL COLUMNS ({len(all_cols)}): {all_cols}")
-print("\nTRUNCATED TABLE:")
-print("=" * 80)
-print(truncated)
-print("\n" + "=" * 80)
-
-# Count columns in output
-if truncated:
-    lines = truncated.split("\n")
-    for line in lines:
-        if "|" in line and line.strip().startswith("|"):
-            parts = [p.strip() for p in line.split("|") if p.strip()]
-            print(f"\nColumns shown: {len(parts)}")
-            print(f"Column names: {parts}")
-            break
-
-# Test with narrow table (should not truncate)
-print("\n\n" + "=" * 80)
-print("TEST 2: Narrow table (should NOT truncate)")
-print("=" * 80)
-
-narrow_table = """Results:
+_NARROW_TABLE = """Results:
 
 | id | x | y | z | value | View |
 |---:|---:|---:|---:|---:|---:|
@@ -50,6 +25,32 @@ narrow_table = """Results:
 
 Done."""
 
-truncated2, was_truncated2, all_cols2 = _truncate_table_columns(narrow_table, max_cols=5)
-print(f"\nWAS TRUNCATED: {was_truncated2} (should be False)")
-print(f"ALL COLUMNS: {all_cols2}")
+
+def test_wide_table_is_truncated():
+    """A table with more than max_cols columns is truncated."""
+    truncated, was_truncated, all_cols = _truncate_table_columns(
+        _WIDE_TABLE, max_cols=5
+    )
+    assert was_truncated is True
+    assert len(all_cols) > 5
+
+    # The rendered output should have at most max_cols data columns
+    for line in truncated.split("\n"):
+        if "|" in line and line.strip().startswith("|"):
+            parts = [p.strip() for p in line.split("|") if p.strip()]
+            assert len(parts) <= 5
+            break
+
+
+def test_narrow_table_is_not_truncated():
+    """A table with fewer columns than max_cols is left unchanged."""
+    truncated, was_truncated, all_cols = _truncate_table_columns(
+        _NARROW_TABLE, max_cols=5
+    )
+    assert was_truncated is False
+
+
+def test_all_cols_reports_original_count():
+    """all_cols always reflects the original column count regardless of truncation."""
+    _, _, all_cols = _truncate_table_columns(_WIDE_TABLE, max_cols=5)
+    assert len(all_cols) == 15  # 15 columns in _WIDE_TABLE

@@ -1,4 +1,4 @@
-# neurogabber
+# neuroglancer-chat
 
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 ![Code Style](https://img.shields.io/badge/code%20style-black-black)
@@ -12,33 +12,32 @@
 ### Manual start:
 **Backend**
 ```bash
-cd src\neurogabber
+cd src\neuroglancer_chat
 $env:TIMING_MODE = "true"  # Optional
 uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 **Frontend**
 ```bash
-cd src\neurogabber
+cd src\neuroglancer_chat
 $env:BACKEND = "http://127.0.0.1:8000"
 uv run python -m panel serve panel\panel_app.py --autoreload --port 8006 --address 127.0.0.1 --allow-websocket-origin=127.0.0.1:8006 --allow-websocket-origin=localhost:8006
 ```
 + open browser: http://localhost:8006
 
-+ debug mode: $env:NEUROGABBER_DEBUG = "1" 
++ debug mode: $env:NEUROGLANCER_CHAT_DEBUG = "1" 
 
     
 
 ### Quick start with launch scripts:
-+ Bash: `./start.sh` or `./start.sh --timing` (enable performance monitoring)
-+ PowerShell: `.\start.ps1` or `.\start.ps1 -Timing` (enable performance monitoring)
-+ `.\start_backend.ps1` or `.\start_backend.ps1 -Timing`
-+ `.\start_panel.ps1` 
++ Backend: `.\scripts\start_backend.ps1` or `.\scripts\start_backend.ps1 -Timing` (enable performance monitoring)
++ Frontend: `.\scripts\start_panel.ps1` or `.\scripts\start_panel.ps1 -Streaming`
++ Stop all: `.\scripts\kill_app.ps1`
 
 ### Tests
     + `uv run -m coverage run -m pytest`
     + `uv run -m coverage report`
 
-    + Intergration test: C:/Users/matt.davis/code/neurogabber/.venv/Scripts/python.exe -m pytest tests/test_integration_query_with_links.py -v -s
+    + Integration test: `uv run python -m pytest tests/test_integration_query_with_links.py -v -s`
 
 ## Installation
 To use the software, in the root directory, run
@@ -153,7 +152,7 @@ The backend preserves the *entire* Neuroglancer JSON state parsed from any loade
 All state mutation now goes through the `NeuroglancerState` class (procedural helper functions were removed). Methods mutate in place and return `self` for optional chaining:
 
 ```python
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
 
 state = NeuroglancerState()
 state.set_view({"x": 10, "y": 20, "z": 30}, "fit", "xy") \
@@ -218,3 +217,4 @@ Common exploration pattern:
 ## Tool Trace
 
 Each chat response includes a concise `tool_trace` listing executed tools, argument keys, and result keys. For deeper debugging hit `/debug/tool_trace?n=5` to retrieve recent full traces (in-memory, bounded). This aids reproducibility and performance analysis without inflating LLM context.
+

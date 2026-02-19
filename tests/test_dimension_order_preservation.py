@@ -6,7 +6,7 @@ to the dimension order in the dimensions object. If dimensions get reordered
 """
 import json
 from urllib.parse import unquote
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState, to_url, from_url
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState, to_url, from_url
 
 
 def test_dimension_order_preserved_in_serialization():

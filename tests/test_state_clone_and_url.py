@@ -1,4 +1,4 @@
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState, to_url, from_url
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState, to_url, from_url
 
 
 def test_clone_independence():

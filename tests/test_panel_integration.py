@@ -182,8 +182,8 @@ class TestUrlChangeHandling:
         mock_canonical_url = "https://example.com/#!%7B%22expanded%22%3Atrue%7D"
         mock_state = {"expanded": True}
         
-        with patch('neurogabber.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer, \
-             patch('neurogabber.backend.tools.pointer_expansion.expand_if_pointer_and_generate_inline') as mock_expand:
+        with patch('neuroglancer_chat.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer, \
+             patch('neuroglancer_chat.backend.tools.pointer_expansion.expand_if_pointer_and_generate_inline') as mock_expand:
             
             mock_is_pointer.return_value = True
             mock_expand.return_value = (mock_canonical_url, mock_state, True)
@@ -233,7 +233,7 @@ class TestUrlChangeHandling:
     @pytest.mark.asyncio
     async def test_handle_url_change_with_inline_json(self):
         """Test URL change handling with inline JSON (no expansion)."""
-        with patch('neurogabber.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer:
+        with patch('neuroglancer_chat.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer:
             mock_is_pointer.return_value = False
             
             mock_backend_sync = AsyncMock()
@@ -254,8 +254,8 @@ class TestUrlChangeHandling:
     @pytest.mark.asyncio
     async def test_handle_url_change_with_error(self):
         """Test URL change error handling."""
-        with patch('neurogabber.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer, \
-             patch('neurogabber.backend.tools.pointer_expansion.expand_if_pointer_and_generate_inline') as mock_expand:
+        with patch('neuroglancer_chat.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer, \
+             patch('neuroglancer_chat.backend.tools.pointer_expansion.expand_if_pointer_and_generate_inline') as mock_expand:
             
             mock_is_pointer.return_value = True
             mock_expand.side_effect = ValueError("S3 access denied")
@@ -293,8 +293,8 @@ class TestBackendStateSync:
         mock_canonical_url = "https://example.com/#!%7B%22expanded%22%3Atrue%7D"
         mock_state = {"expanded": True}
         
-        with patch('neurogabber.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer, \
-             patch('neurogabber.backend.tools.pointer_expansion.expand_if_pointer_and_generate_inline') as mock_expand, \
+        with patch('neuroglancer_chat.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer, \
+             patch('neuroglancer_chat.backend.tools.pointer_expansion.expand_if_pointer_and_generate_inline') as mock_expand, \
              patch('httpx.AsyncClient') as mock_client:
             
             mock_is_pointer.return_value = True
@@ -346,8 +346,8 @@ class TestBackendStateSync:
     @pytest.mark.asyncio
     async def test_notify_backend_state_load_expansion_error(self):
         """Test backend sync with pointer expansion error."""
-        with patch('neurogabber.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer, \
-             patch('neurogabber.backend.tools.pointer_expansion.expand_if_pointer_and_generate_inline') as mock_expand, \
+        with patch('neuroglancer_chat.backend.tools.pointer_expansion.is_pointer_url') as mock_is_pointer, \
+             patch('neuroglancer_chat.backend.tools.pointer_expansion.expand_if_pointer_and_generate_inline') as mock_expand, \
              patch('httpx.AsyncClient') as mock_client:
             
             mock_is_pointer.return_value = True

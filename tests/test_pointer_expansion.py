@@ -7,7 +7,7 @@ import pytest
 from unittest.mock import Mock, patch
 from typing import Dict, Any
 
-from neurogabber.backend.tools.pointer_expansion import (
+from neuroglancer_chat.backend.tools.pointer_expansion import (
     expand_if_pointer_and_generate_inline,
     is_pointer_url,
     resolve_neuroglancer_pointer,
@@ -242,8 +242,8 @@ class TestExpandPointer:
 class TestFetchers:
     """Test cloud storage fetchers."""
     
-    @patch('neurogabber.backend.tools.pointer_expansion._HAS_BOTO3', True)
-    @patch('neurogabber.backend.tools.pointer_expansion.boto3')
+    @patch('neuroglancer_chat.backend.tools.pointer_expansion._HAS_BOTO3', True)
+    @patch('neuroglancer_chat.backend.tools.pointer_expansion.boto3')
     def test_fetch_s3_success(self, mock_boto3):
         """Test successful S3 fetch."""
         mock_s3_client = Mock()
@@ -261,7 +261,7 @@ class TestFetchers:
             Bucket="test-bucket", Key="path/to/file.json"
         )
     
-    @patch('neurogabber.backend.tools.pointer_expansion._HAS_BOTO3', False)
+    @patch('neuroglancer_chat.backend.tools.pointer_expansion._HAS_BOTO3', False)
     def test_fetch_s3_missing_boto3(self):
         """Test S3 fetch without boto3 installed."""
         with pytest.raises(RuntimeError, match="boto3 not installed"):
@@ -272,8 +272,8 @@ class TestFetchers:
         with pytest.raises(ValueError, match="Not a valid s3 URL"):
             _fetch_s3("invalid://url")
     
-    @patch('neurogabber.backend.tools.pointer_expansion._HAS_GCS', True)
-    @patch('neurogabber.backend.tools.pointer_expansion.gcs')
+    @patch('neuroglancer_chat.backend.tools.pointer_expansion._HAS_GCS', True)
+    @patch('neuroglancer_chat.backend.tools.pointer_expansion.gcs')
     def test_fetch_gs_success(self, mock_gcs):
         """Test successful GS fetch."""
         mock_client = Mock()
@@ -291,7 +291,7 @@ class TestFetchers:
         mock_client.bucket.assert_called_once_with("test-bucket")
         mock_bucket.blob.assert_called_once_with("path/to/file.json")
     
-    @patch('neurogabber.backend.tools.pointer_expansion._HAS_GCS', False)
+    @patch('neuroglancer_chat.backend.tools.pointer_expansion._HAS_GCS', False)
     def test_fetch_gs_missing_gcs(self):
         """Test GS fetch without google-cloud-storage installed."""
         with pytest.raises(RuntimeError, match="google-cloud-storage not installed"):

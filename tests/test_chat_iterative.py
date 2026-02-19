@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app, DATA_MEMORY, CURRENT_STATE
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState
+from neuroglancer_chat.backend.main import app, DATA_MEMORY, CURRENT_STATE
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
 
 client = TestClient(app)
 
@@ -18,7 +18,7 @@ def test_data_info_non_mutating_no_link(monkeypatch):
     fid = _upload_small_csv()
 
     # Monkeypatch run_chat to simulate a single tool call then final answer.
-    from neurogabber.backend import adapters
+    from neuroglancer_chat.backend import adapters
 
     calls = []
 
@@ -47,7 +47,7 @@ def test_data_info_non_mutating_no_link(monkeypatch):
 
 def test_mutating_tool_returns_link(monkeypatch):
     # Reset state (optional for clarity)
-    from neurogabber.backend import main as backend_main
+    from neuroglancer_chat.backend import main as backend_main
     backend_main.CURRENT_STATE = NeuroglancerState()
 
     def fake_run_chat(msgs):
@@ -59,7 +59,7 @@ def test_mutating_tool_returns_link(monkeypatch):
         else:
             return {"choices": [{"index": 0, "message": {"role": "assistant", "content": "View updated."}}]}
 
-    from neurogabber.backend import adapters
+    from neuroglancer_chat.backend import adapters
     monkeypatch.setattr(adapters.llm, "run_chat", fake_run_chat)
 
     resp = client.post("/agent/chat", json={"messages": [{"role": "user", "content": "Center on 1 2 3."}]})

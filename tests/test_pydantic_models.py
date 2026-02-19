@@ -8,8 +8,8 @@ Verifies that all endpoints using Pydantic models work correctly via:
 
 import pytest
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app, CURRENT_STATE, DATA_MEMORY, _execute_tool_by_name
-from neurogabber.backend.tools.neuroglancer_state import NeuroglancerState
+from neuroglancer_chat.backend.main import app, CURRENT_STATE, DATA_MEMORY, _execute_tool_by_name
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def client():
 def reset_state():
     """Reset global state before each test."""
     global CURRENT_STATE
-    from neurogabber.backend.main import CURRENT_STATE as _cs
+    from neuroglancer_chat.backend.main import CURRENT_STATE as _cs
     # Reset to fresh state
     _cs.data = {
         "dimensions": {"x": [1e-9, "m"], "y": [1e-9, "m"], "z": [1e-9, "m"]},
@@ -72,7 +72,7 @@ class TestAddLayer:
         assert result["ok"] is True
         
         # Verify layer was added correctly
-        from neurogabber.backend.main import CURRENT_STATE
+        from neuroglancer_chat.backend.main import CURRENT_STATE
         layers = CURRENT_STATE.data.get("layers", [])
         ann_layer = next((l for l in layers if l["name"] == "ann"), None)
         assert ann_layer is not None
@@ -109,7 +109,7 @@ class TestAnnotationWorkflow:
     
     def test_create_annotation_layer_then_add_point(self):
         """Test creating annotation layer then adding point (the original bug)."""
-        from neurogabber.backend.main import CURRENT_STATE
+        from neuroglancer_chat.backend.main import CURRENT_STATE
         
         # Step 1: Create annotation layer via dispatcher (simulates LLM call)
         result1 = _execute_tool_by_name(
@@ -186,7 +186,7 @@ class TestAnnotationWorkflow:
         )
         
         # Get layer and check source type
-        from neurogabber.backend.main import CURRENT_STATE
+        from neuroglancer_chat.backend.main import CURRENT_STATE
         layers = CURRENT_STATE.data.get("layers", [])
         ann_layer = next((l for l in layers if l["name"] == "ann"), None)
         
@@ -198,7 +198,7 @@ class TestAnnotationWorkflow:
     
     def test_annotation_persistence_via_http(self, client):
         """Test that annotations persist in CURRENT_STATE when added via HTTP endpoint."""
-        from neurogabber.backend.main import CURRENT_STATE
+        from neuroglancer_chat.backend.main import CURRENT_STATE
         
         # Step 1: Create annotation layer via HTTP
         response1 = client.post(
@@ -296,7 +296,7 @@ class TestStateLoad:
     def test_state_load_via_http(self, client):
         """Test loading state via HTTP."""
         # Create a simple state URL
-        from neurogabber.backend.main import CURRENT_STATE
+        from neuroglancer_chat.backend.main import CURRENT_STATE
         url = CURRENT_STATE.to_url()
         
         response = client.post("/tools/state_load", json={"link": url})
@@ -305,7 +305,7 @@ class TestStateLoad:
         
     def test_state_load_via_dispatcher(self):
         """Test loading state via dispatcher."""
-        from neurogabber.backend.main import CURRENT_STATE
+        from neuroglancer_chat.backend.main import CURRENT_STATE
         url = CURRENT_STATE.to_url()
         
         result = _execute_tool_by_name("state_load", {"link": url})
@@ -313,7 +313,7 @@ class TestStateLoad:
         
     def test_demo_load_same_as_state_load(self, client):
         """Verify demo_load uses same StateLoad model."""
-        from neurogabber.backend.main import CURRENT_STATE
+        from neuroglancer_chat.backend.main import CURRENT_STATE
         url = CURRENT_STATE.to_url()
         
         response = client.post("/tools/demo_load", json={"link": url})
@@ -584,3 +584,4 @@ class TestPydanticValidation:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

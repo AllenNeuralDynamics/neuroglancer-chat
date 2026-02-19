@@ -3,7 +3,7 @@ Tests for the plotting functionality.
 """
 import pytest
 import polars as pl
-from neurogabber.backend.tools.plotting import validate_plot_requirements, generate_plot
+from neuroglancer_chat.backend.tools.plotting import validate_plot_requirements, build_plot_spec
 
 
 def test_validate_plot_requirements_valid():
@@ -62,82 +62,70 @@ def test_validate_plot_requirements_large_dataframe():
     assert len(result["suggestions"]) > 0
 
 
-def test_generate_plot_structure():
-    """Test that plot generation returns expected structure."""
+def test_build_plot_spec_structure():
+    """build_plot_spec returns the expected keys for a scatter plot."""
     df = pl.DataFrame({
         "x": [1, 2, 3, 4, 5],
         "y": [2, 4, 6, 8, 10]
     })
-    
-    result = generate_plot(df, "scatter", "x", "y")
-    
-    # Should return dict with expected keys
+
+    result = build_plot_spec(df, "scatter", "x", "y")
+
     assert isinstance(result, dict)
-    # Check for plot_html OR error
-    assert "plot_html" in result or "error" in result
-    
-    if "plot_html" in result:
+    # Returns plot_kwargs dict OR an error (if hvplot not installed)
+    assert "plot_kwargs" in result or "error" in result
+
+    if "plot_kwargs" in result:
         assert result["plot_type"] == "scatter"
         assert result["row_count"] == 5
         assert "is_interactive" in result
 
 
-def test_generate_plot_with_grouping():
-    """Test plot generation with grouping (by parameter)."""
+def test_build_plot_spec_with_grouping():
+    """build_plot_spec handles the by= grouping parameter."""
     df = pl.DataFrame({
         "x": [1, 2, 3, 4, 5],
         "y": [2, 4, 6, 8, 10],
         "category": ["A", "B", "A", "B", "A"]
     })
-    
-    result = generate_plot(df, "scatter", "x", "y", by="category")
-    
-    # Should handle grouping
-    if "plot_html" in result:
+
+    result = build_plot_spec(df, "scatter", "x", "y", by="category")
+
+    if "plot_kwargs" in result:
         assert result["plot_type"] == "scatter"
         assert result["row_count"] == 5
 
 
-def test_generate_plot_interactive_threshold():
-    """Test that plots become non-interactive above threshold."""
-    # Small dataset - should be interactive
+def test_build_plot_spec_interactive_threshold():
+    """Plots are interactive for small datasets and static for large ones."""
     small_df = pl.DataFrame({
         "x": list(range(50)),
         "y": list(range(50))
     })
-    
-    small_result = generate_plot(small_df, "line", "x", "y")
-    
+    small_result = build_plot_spec(small_df, "line", "x", "y")
     if "is_interactive" in small_result:
         assert small_result["is_interactive"] is True
-    
-    # Large dataset - should not be interactive
+
     large_df = pl.DataFrame({
         "x": list(range(250)),
         "y": list(range(250))
     })
-    
-    large_result = generate_plot(large_df, "line", "x", "y")
-    
+    large_result = build_plot_spec(large_df, "line", "x", "y")
     if "is_interactive" in large_result:
         assert large_result["is_interactive"] is False
 
 
-def test_generate_plot_types():
-    """Test all supported plot types."""
+def test_build_plot_spec_plot_types():
+    """build_plot_spec accepts all supported plot types."""
     df = pl.DataFrame({
         "x": [1, 2, 3, 4, 5],
         "y": [2, 4, 6, 8, 10]
     })
-    
-    plot_types = ["scatter", "line", "bar"]
-    
-    for plot_type in plot_types:
-        result = generate_plot(df, plot_type, "x", "y")
-        # Should either succeed or have error (hvplot might not be installed in test env)
+
+    for plot_type in ("scatter", "line", "bar"):
+        result = build_plot_spec(df, plot_type, "x", "y")
         assert isinstance(result, dict)
-        if "plot_html" in result:
+        if "plot_kwargs" in result:
             assert result["plot_type"] == plot_type
         elif "error" in result:
-            # Expected if hvplot not installed
             assert "hvplot" in result["error"].lower()

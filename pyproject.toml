@@ -3,7 +3,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "neurogabber"
+name = "neuroglancer-chat"
 description = "Generated from aind-library-template"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -57,7 +57,7 @@ panel = [
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "neurogabber.__version__"}
+version = {attr = "neuroglancer_chat.__version__"}
 
 [tool.black]
 line-length = 79
@@ -83,7 +83,7 @@ exclude = '''
 
 [tool.coverage.run]
 omit = ["*__init__*"]
-source = ["neurogabber", "tests"]
+source = ["neuroglancer_chat", "tests"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -98,6 +98,10 @@ fail_under = 100
 line_length = 79
 profile = "black"
 skip = [".conda"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [tool.interrogate]
 exclude = ["setup.py", "docs", "build", ".conda"]

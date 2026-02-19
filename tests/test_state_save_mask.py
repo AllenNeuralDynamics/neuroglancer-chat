@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app
+from neuroglancer_chat.backend.main import app
 
 
 client = TestClient(app)
@@ -7,7 +7,7 @@ client = TestClient(app)
 
 def test_state_save_raw_and_masked():
     # Raw first
-    r1 = client.post("/tools/state_save", json={"dummy": true}) if False else client.post("/tools/state_save", json={})
+    r1 = client.post("/tools/state_save", json={})
     assert r1.status_code == 200
     data1 = r1.json()
     assert "url" in data1 and data1["url"].startswith("http")

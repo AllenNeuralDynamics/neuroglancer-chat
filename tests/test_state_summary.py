@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
-from neurogabber.backend.main import app, CURRENT_STATE
-from neurogabber.examples.ng_state_dict import STATE_DICT
-from neurogabber.backend.tools.neuroglancer_state import to_url, from_url
+from neuroglancer_chat.backend.main import app, CURRENT_STATE
+from neuroglancer_chat.examples.ng_state_dict import STATE_DICT
+from neuroglancer_chat.backend.tools.neuroglancer_state import to_url, from_url
 
 client = TestClient(app)
 
