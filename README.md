@@ -38,7 +38,7 @@ uv run python -m panel serve panel\panel_app.py --autoreload --port 8006 --addre
     + `uv run -m coverage run -m pytest`
     + `uv run -m coverage report`
 
-    + Intergration test: C:/Users/matt.davis/code/neuroglancer-chat/.venv/Scripts/python.exe -m pytest tests/test_integration_query_with_links.py -v -s
+    + Integration test: `uv run python -m pytest tests/test_integration_query_with_links.py -v -s`
 
 ## Installation
 To use the software, in the root directory, run
@@ -153,7 +153,7 @@ The backend preserves the *entire* Neuroglancer JSON state parsed from any loade
 All state mutation now goes through the `NeuroglancerState` class (procedural helper functions were removed). Methods mutate in place and return `self` for optional chaining:
 
 ```python
-from neuroglancer-chat.backend.tools.neuroglancer_state import NeuroglancerState
+from neuroglancer_chat.backend.tools.neuroglancer_state import NeuroglancerState
 
 state = NeuroglancerState()
 state.set_view({"x": 10, "y": 20, "z": 30}, "fit", "xy") \

@@ -4,7 +4,9 @@
 
 **Goal:** Bring streaming chat handler to feature parity with non-streaming handler to provide better UX and eventually deprecate non-streaming mode.
 
-**Status:** Not started (blocked on Phase 1 & 2 completion)
+**Status:** Not started
+
+> **Context:** "Phase 1 & 2" refer to the core streaming implementation (SSE backend, Panel streaming mode) completed in PR #10, and the query result chaining / annotation workflow improvements that followed. Both are now in `main`. Phase 3 is the remaining UI-parity work documented here.
 
 ### Background
 
