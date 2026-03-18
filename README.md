@@ -1,4 +1,4 @@
-# neuroglancer-chat
+# Neuroglancer-chat
 
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 ![Code Style](https://img.shields.io/badge/code%20style-black-black)
@@ -6,6 +6,13 @@
 ![Interrogate](https://img.shields.io/badge/interrogate-46.1%25-red)
 ![Coverage](https://img.shields.io/badge/coverage-20%25-red)
 ![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
+
+
+## Demo
+https://github.com/user-attachments/assets/7c905ba2-0c61-4316-aca4-fe538df4f200
+
+Data in demo is spatial transciptomics volume visual cortex of a mouse. Collected for the Cell Types and Learning project under the Allen Insititute Neural Dynamics accelerator.
+Dataset is available in an open S3 bucket via AWS.
 
 ## To run
 
