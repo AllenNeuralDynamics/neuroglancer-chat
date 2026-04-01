@@ -31,6 +31,8 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "python-multipart>=0.0.20",
     "uvicorn[standard]>=0.35.0",
+    "panel>=1.7.5",
+    "panel-neuroglancer>=0.1.0",
 ]
 
 [dependency-groups]
@@ -47,10 +49,6 @@ dev = [
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
     "jsonschema>=4.22.0",
-]
-panel = [
-    "panel>=1.7.5",
-    "panel-neuroglancer>=0.1.0",
 ]
 
 [tool.setuptools.packages.find]
