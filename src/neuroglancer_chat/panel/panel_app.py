@@ -2233,7 +2233,7 @@ workspace_card = pn.Card(
 )
 
 app = pn.template.FastListTemplate(
-    title=f"Neuroglanger Chat v{version}",
+    title=f"Neuroglancer Chat v{version}",
     sidebar=[agent_status_card, chat], #views_table (dont need below)
     right_sidebar=[reset_app_btn, viewer_settings_card, settings_card],
     collapsed_right_sidebar = True,
