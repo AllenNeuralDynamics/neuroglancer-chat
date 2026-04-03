@@ -1965,6 +1965,8 @@ dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "openai" },
+    { name = "panel" },
+    { name = "panel-neuroglancer" },
     { name = "pillow" },
     { name = "polars" },
     { name = "pyarrow" },
@@ -1990,10 +1992,6 @@ dev = [
     { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "sphinx", version = "8.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-panel = [
-    { name = "panel" },
-    { name = "panel-neuroglancer" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -2004,6 +2002,8 @@ requires-dist = [
     { name = "hvplot", specifier = ">=0.11.3" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "openai", specifier = ">=1.104.2" },
+    { name = "panel", specifier = ">=1.7.5" },
+    { name = "panel-neuroglancer", specifier = ">=0.1.0" },
     { name = "pillow", specifier = ">=11.3.0" },
     { name = "polars", specifier = ">=1.33.0" },
     { name = "pyarrow", specifier = ">=21.0.0" },
@@ -2027,10 +2027,6 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.1.0" },
     { name = "ruff", specifier = ">=0.12.11" },
     { name = "sphinx" },
-]
-panel = [
-    { name = "panel", specifier = ">=1.7.5" },
-    { name = "panel-neuroglancer", specifier = ">=0.1.0" },
 ]
 
 [[package]]
