@@ -47,11 +47,13 @@ pn.extension(
 BACKEND = os.environ.get("BACKEND", "http://127.0.0.1:8000")
 USE_STREAMING = os.environ.get("USE_STREAMING", "true").lower() == "true"
 
-viewer = Neuroglancer()
+DEMO_URL = "https://neuroglancer-demo.appspot.com/#!%7B%22dimensions%22:%7B%22x%22:%5B6.000000000000001e-9%2C%22m%22%5D%2C%22y%22:%5B6.000000000000001e-9%2C%22m%22%5D%2C%22z%22:%5B3.0000000000000004e-8%2C%22m%22%5D%7D%2C%22position%22:%5B5523.99072265625%2C8538.9384765625%2C1198.0423583984375%5D%2C%22crossSectionScale%22:3.7621853549999242%2C%22projectionOrientation%22:%5B-0.0040475670248270035%2C-0.9566215872764587%2C-0.22688281536102295%2C-0.18271005153656006%5D%2C%22projectionScale%22:4699.372698097029%2C%22layers%22:%5B%7B%22type%22:%22image%22%2C%22source%22:%22precomputed://gs://neuroglancer-public-data/kasthuri2011/image%22%2C%22tab%22:%22source%22%2C%22name%22:%22original-image%22%2C%22visible%22:false%7D%2C%7B%22type%22:%22image%22%2C%22source%22:%22precomputed://gs://neuroglancer-public-data/kasthuri2011/image_color_corrected%22%2C%22tab%22:%22source%22%2C%22name%22:%22corrected-image%22%7D%2C%7B%22type%22:%22segmentation%22%2C%22source%22:%22precomputed://gs://neuroglancer-public-data/kasthuri2011/ground_truth%22%2C%22tab%22:%22source%22%2C%22selectedAlpha%22:0.63%2C%22notSelectedAlpha%22:0.14%2C%22segments%22:%5B%223208%22%2C%224901%22%2C%2213%22%2C%224965%22%2C%224651%22%2C%222282%22%2C%223189%22%2C%223758%22%2C%2215%22%2C%224027%22%2C%223228%22%2C%22444%22%2C%223207%22%2C%223224%22%2C%223710%22%5D%2C%22name%22:%22ground_truth%22%7D%5D%2C%22layout%22:%224panel%22%7D"
+
+viewer = Neuroglancer(source=DEMO_URL)
 status = pn.pane.Markdown("Ready.")
 
 # Track last loaded Neuroglancer URL (dedupe reloads)
-last_loaded_url: str | None = None
+last_loaded_url: str | None = DEMO_URL
 _trace_history = []
 _full_table_data = {}  # Store full table data for modal: {message_id: full_table_text}
 
@@ -218,7 +220,7 @@ def _update_preview(file_id: str = None, summary_id: str = None, is_summary: boo
 auto_load_checkbox = pn.widgets.Checkbox(name="Auto-load view", value=True)
 show_query_tables = pn.widgets.Checkbox(name="Show query tables in plots", value=False)
 show_agent_status = pn.widgets.Checkbox(name="Show Agent Status", value=True)
-latest_url = pn.widgets.TextInput(name="Latest NG URL", value="", disabled=True)
+latest_url = pn.widgets.TextInput(name="Latest NG URL", value=DEMO_URL, disabled=True)
 update_state_interval = pn.widgets.IntInput(name="Update state interval (sec)", value=5, start=1)
 trace_history_checkbox = pn.widgets.Checkbox(name="Trace history", value=True)
 trace_history_length = pn.widgets.IntInput(name="History N", value=5)
