@@ -4,7 +4,7 @@ from openai import OpenAI
 
 _API_KEY = os.getenv("OPENAI_API_KEY")
 #MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")  # Configurable via env var
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5-nano")  # Configurable via env var
+MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")  # Configurable via env var
 
 client = None
 if _API_KEY:
